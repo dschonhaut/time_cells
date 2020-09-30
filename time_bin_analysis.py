@@ -14,7 +14,7 @@ Functions for analyzing firing rate data within event windows.
 
 Last Edited
 ----------- 
-9/6/20
+9/17/20
 """
 import sys
 import os
@@ -96,6 +96,64 @@ def calc_fr_by_time_bin(fr_train,
                                                              random_shift))
                                        .tolist())
     return fr_by_time_bin
+
+
+def calc_mean_fr_by_time(fr_by_time_bin_f,
+                         proj_dir='/home1/dscho/projects/time_cells',
+                         overwrite=False,
+                         save_output=True,
+                         verbose=True):
+    """Calculate mean FR across trial phases of a given type."""
+    neuron = '-'.join(os.path.basename(fr_by_time_bin_f).split('-')[:3])
+
+    # Load the output file if it exists.
+    output_f = os.path.join(proj_dir, 'analysis', 'fr_by_time_bin', 
+                            '{}-mean_fr_by_time.pkl'.format(neuron))
+    if os.path.exists(output_f) and not overwrite:
+        return dio.open_pickle(output_f)
+
+    subj_sess, chan, unit = neuron.split('-')
+    chan = chan[3:]
+    subj, sess = subj_sess.split('_')
+    event_times = dio.open_pickle(fr_by_time_bin_f)['event_times']
+    n_perm = event_times['fr_null'].iloc[0].shape[0]
+    game_states = [['Prepare1'], ['Delay1'], ['Encoding'], ['Prepare2'], ['Delay2'], ['Retrieval'],
+                   ['Prepare1', 'Prepare2'], ['Delay1', 'Delay2'], ['Encoding', 'Retrieval']]
+    cols = ['subj_sess', 'subj', 'sess', 'chan', 'unit', 'gameState', 
+            'fr', 'z_fr', 'z_fr_max', 'z_fr_max_ind', 'tis', 'z_tis', 'pval']
+    output = []
+    for game_state in game_states:
+        if not np.all(np.isin(game_state, event_times['gameState'].unique())):
+            continue
+        obs = np.mean(event_times
+                      .query("(gameState=={})".format(game_state))['fr']
+                      .tolist(), axis=0)
+        null_mean = np.mean(np.mean(event_times
+                                    .query("(gameState=={})".format(game_state))['fr_null']
+                                    .tolist(), axis=0), axis=0)
+        null_std = np.std(np.mean(event_times
+                                  .query("(gameState=={})".format(game_state))['fr_null']
+                                  .tolist(), axis=0), axis=0)
+        obs_z = (obs - null_mean) / null_std
+        
+        tis = info_rate(obs)  # temporal information score
+        null_tis = np.array([info_rate(np.mean(event_times
+                                               .query("(gameState=={})".format(game_state))['fr_null']
+                                               .tolist(), axis=0)[iPerm, :])
+                             for iPerm in range(n_perm)])
+        tis_z = (tis - np.mean(null_tis)) / np.std(null_tis)
+        pval = (np.sum(null_tis >= tis) + 1) / (n_perm + 1)
+        
+        output.append([subj_sess, subj, sess, chan, unit, '_'.join(game_state), 
+                       obs, obs_z, obs_z.max(), obs_z.argmax(), tis, tis_z, pval])
+        
+    output = pd.DataFrame(output, columns=cols)
+
+    # Save output.
+    if save_output:
+        dio.save_pickle(output, output_f, verbose)
+
+    return output
 
 
 def classify_time_bins(spikes, 
@@ -216,7 +274,7 @@ def fr_by_time_vs_null(fr_train,
                                             game_states,
                                             n_time_bins,
                                             random_shift=False),
-                     axis=0)
+                        axis=0)
     temporal_info = info_rate(fr_vec)
     
     # Generate a surrogate distribution by circ-shifting the firing rates
@@ -230,7 +288,7 @@ def fr_by_time_vs_null(fr_train,
                                                      game_states,
                                                      n_time_bins,
                                                      random_shift=True),
-                              axis=0)
+                                 axis=0)
         null_fr_vecs.append(fr_vec_null)
         null_temporal_info.append(info_rate(fr_vec_null))
     null_fr_vecs = np.array(null_fr_vecs) # iPerm x iTime
@@ -255,7 +313,8 @@ def fr_by_time_vs_null(fr_train,
     return output
 
 
-def info_rate(fr_given_x, prob_x=None):
+def info_rate(fr_given_x, 
+              prob_x=None):
     """Return the information rate of a cell in bits/spike.
     
     From Skaggs et al., 1993.
@@ -276,29 +335,29 @@ def info_rate(fr_given_x, prob_x=None):
     mean_fr = np.dot(prob_x, fr_given_x)
     bits_per_spike = np.nansum(prob_x * (fr_given_x/mean_fr) * np.log2(fr_given_x/mean_fr))
     return bits_per_spike
+
+
+# def shift_fr_train(event_window, fr_train):
+#     """Circ-shift firing rates within an event window.
     
-    
-def shift_fr_train(event_window, fr_train):
-    """Circ-shift firing rates within an event window.
-    
-    Circ-shifts firing rates by a random number of 
-    timepoints up to the duration of the event window.
+#     Circ-shifts firing rates by a random number of 
+#     timepoints up to the duration of the event window.
         
-    Parameters
-    ----------
-    event_window : list or tuple
-        Contains [start, stop] times in ms.
-    fr_train : numpy.ndarray
-        Vector of firing rates over the session, in ms.
+#     Parameters
+#     ----------
+#     event_window : list or tuple
+#         Contains [start, stop] times in ms.
+#     fr_train : numpy.ndarray
+#         Vector of firing rates over the session, in ms.
     
-    Returns:
-    --------
-    fr_train_shifted : numpy.ndarray
-        Vector of shifted spike times within the event window.
-    """
-    start, stop = event_window
-    roll_by = int(np.random.rand() * (stop - start))
-    start = int(np.round(start, 0))
-    stop = int(np.round(stop, 0))
-    fr_train_shifted = np.roll(fr_train[start:stop], roll_by)
-    return fr_train_shifted
+#     Returns:
+#     --------
+#     fr_train_shifted : numpy.ndarray
+#         Vector of shifted spike times within the event window.
+#     """
+#     start, stop = event_window
+#     roll_by = int(np.random.rand() * (stop - start))
+#     start = int(np.round(start, 0))
+#     stop = int(np.round(stop, 0))
+#     fr_train_shifted = np.roll(fr_train[start:stop], roll_by)
+#     return fr_train_shifted
