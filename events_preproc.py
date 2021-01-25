@@ -14,12 +14,12 @@ Functions for reading and processing Goldmine event logfiles.
 
 Last Edited
 ----------- 
-9/12/20
+12/4/20
 """
 import sys
 import os
 from collections import OrderedDict as od
-
+import h5py
 import mkl
 mkl.set_num_threads(1)
 import numpy as np
@@ -27,21 +27,17 @@ import pandas as pd
 import scipy.io as sio
 import scipy.stats as stats
 import statsmodels.api as sm
-
 sys.path.append('/home1/dscho/code/general')
 import data_io as dio
 
 
 def align_sync_pulses(event_synctimes,  # vector of event sync times
                       lfp_synctimes,  # vector of LFP sync times in ms
-                      verbose=True):  # Hz
+                      verbose=True):
     """Return the slope and intercept to align event to LFP times.
     
-    Algorithm
-    ---------
-    1) Finds the closest LFP sync time to each event sync time.
-    2) Estimates the intercept and slope to align event to
-       LFP sync times using robust linear regression.
+    Uses robust linear regression to estimate the intercept and slope 
+    that best aligns event to LFP sync times.
        
     Parameters
     ----------
@@ -49,8 +45,6 @@ def align_sync_pulses(event_synctimes,  # vector of event sync times
         Vector of event sync times
     lfp_synctimes : numpy.ndarray
         Vector of LFP sync times
-    sampling_rate : int or float
-        Sampling rate of the LFP sync channel in Hz
         
     Returns
     -------
@@ -78,11 +72,6 @@ def align_sync_pulses(event_synctimes,  # vector of event sync times
     
     # For each event sync time, find the closest LFP sync time.
     min_syncs = np.min((len(event_synctimes), len(lfp_synctimes)))
-    # if (len(event_synctimes) == len(lfp_synctimes)):
-    #     sync_pairs = np.array([(event_synctimes[i], 
-    #                             lfp_synctimes[i])
-    #                            for i in range(len(event_synctimes))])
-    # else:
     sync_pairs = np.array([(event_synctimes[i], lfp_synctimes[i])
                            for i in range(min_syncs)])
 
@@ -126,7 +115,7 @@ def create_event_time_bins(subj_sess,
     """
     # Look for existing output file.
     output_f = os.path.join(proj_dir, 'analysis', 'events', 'event_times',
-                            '{}-event_times'.format(subj_sess))
+                            '{}-event_times.pkl'.format(subj_sess))
     if os.path.exists(output_f) and not overwrite:
         print('Found event_times')
         event_times = dio.open_pickle(output_f)
@@ -245,8 +234,9 @@ def fill_column(df,
 def find_pulse_starts(sync_chan, 
                       pulse_thresh=200,  # voltage change
                       sampling_rate=32000,  # Hz
-                      interpulse_thresh_ms=100,
-                      intrapulse_thresh_ms=50,
+                      interpulse_thresh_ms=780,
+                      intrapulse_thresh_ms=20,
+                      pos_only=False,
                       verbose=True): 
     """Return sync_chan indices that mark that start of each sync pulse.
     
@@ -288,7 +278,7 @@ def find_pulse_starts(sync_chan,
     """
     # Find sync pulses by looking for suprathreshold changes 
     # in the absolute value of the derivative of the sync channel
-    sync_pulses = np.abs(np.pad(np.diff(sync_chan), (1, 0), 'constant'))>pulse_thresh
+    sync_pulses = np.abs(np.pad(np.diff(sync_chan), (1, 0), 'constant')) > pulse_thresh
     pulse_inds = np.where(sync_pulses)[0]
 
     # Find the inter-pulse intervals
@@ -321,7 +311,7 @@ def find_sync_shift(event_synctimes,  # vector of event sync times
     min_syncs = np.min((len(event_synctimes), len(lfp_synctimes)))
     lfp_synctimes_diff = np.diff(lfp_synctimes[:min_syncs])
     event_synctimes_diff = np.diff(event_synctimes[:min_syncs])
-    offsets = np.arange(-(min_syncs-1), 1)
+    offsets = np.arange(-(min_syncs-2), 1)
     rvals = np.array([stats.pearsonr(np.roll(lfp_synctimes_diff, offset), event_synctimes_diff)[0]
                       for offset in offsets])
     shift_by = offsets[rvals.argmax()]
@@ -358,7 +348,8 @@ def format_events(subj_sess=None,
     output_f = os.path.join(proj_dir, 'analysis', 'events',
                             '{}-events_formatted.pkl'.format(subj_sess))
     if os.path.exists(output_f) and not overwrite:
-        print('Found formatted events')
+        if verbose:
+            print('Found formatted events')
         events = dio.open_pickle(output_f)
         events = edit_events(events)
         return events
@@ -384,8 +375,7 @@ def format_events(subj_sess=None,
     events['time_penalty'] = -1
     for trial, has_penalty in {x['trial']: x['value']['isTimedTrial']
                                for idx, x in events.query("(key=='timedTrial')").iterrows()}.items():
-        events.loc[events['trial'] == trial,
-                   'time_penalty'] = 1 if has_penalty else 0
+        events.loc[events['trial'] == trial, 'time_penalty'] = 1 if has_penalty else 0
 
     # Reorder columns.
     events = events[['time', 'key', 'value', 'scene',
@@ -539,6 +529,172 @@ def load_syncs(subj_sess,
         with h5py.File(sync_f, 'r') as f:
             sync_chan = np.squeeze(f[data_key])
     return sync_chan
+
+
+def pair_sync_pulses(event_synctimes,
+                     lfp_synctimes,
+                     step=5,
+                     max_shift=100,
+                     max_slide=20,
+                     ipi_thresh=2,
+                     verbose=True):
+    """Find matching sync pulse pairs.
+    
+    --------------------------------------------------------------------
+    Works by comparing the inter-pulse interval times for a short chain 
+    of sync pulses at a time, testing different offsets between event 
+    and LFP pulses. When a good fit is found we add those pulses to the 
+    output vectors; if no good fit is found we move on until we reach 
+    the end of the input vectors.
+    
+    Retains as many identifiable sync pulse pairs as can be discerned.
+    
+    Parameters
+    ----------
+    event_synctimes : np.ndarray
+        Vector of sync times from the behavioral events file.
+    lfp_synctimes : np.ndarray
+        Vector of sync times from detected pulses in the EEG sync 
+        channel.
+    step : int
+        Determines how many sync pulses we compare at a time.
+    max_shift : int
+        How many index positions we shift by, in either direction, in
+        testing for a good LFP-to-event IPI fit.
+    max_slide : int
+        How many index positions we slide either sync time vector
+        forward by *before* testing for a fit at the different index
+        shifts. This prevents the algorithm from getting stuck if we
+        have e.g. an event sync pulse that failed to be written into
+        the EEG sync channel.
+    ipi_thresh : positive number
+        The maximum allowable difference between event and LFP IPIs,
+        in ms, in order for us to call a given fit "good" and add
+        a chain of pulses to the output vectors.
+        
+    Returns
+    -------
+    event_synctimes_adj : np.ndarray
+        The adjusted event sync times.
+    lfp_synctimes_adj : np.ndarray
+        The adjusted LFP sync times, which now match event_synctmes_adj
+        at every index position, and are equal length.
+    """
+    def alternate_2col(stop_at):
+        """Interleave (0, i) and (i, 0) pairs for i = 0..stop_at-1.
+
+        First 3 entries are (0, 0), (0, 1), (1, 0).
+
+        Returns an n x 2 matrix where n = (2 * stop_at) + 1.
+        """
+        mat = [(0, 0)]
+        for x1, x2 in np.vstack((np.zeros(stop_at), np.arange(1, stop_at+1))).T:
+            mat.append((x1, x2))
+            mat.append((x2, x1))
+        mat = np.array(mat).astype(np.int)
+        return mat
+
+    def eval_ipi_fit(lfp_synctimes_diff,
+                     event_synctimes_diff,
+                     shift_lfp, 
+                     shift_event,
+                     ipi_thresh=2):
+        """Evaluate fit between event and LFP inter-pulse intervals.
+
+        Finds the maximum IPI difference at a specified index shift, 
+        and returns whether or not this difference is below the 
+        allowable threshold.
+        """
+        global shift_lfps
+        global shift_events
+        ipi_fit = np.max(np.abs(lfp_synctimes_diff[shift_lfp:shift_lfp+step] - 
+                                event_synctimes_diff[shift_event:shift_event+step]))
+        if ipi_fit < ipi_thresh:
+            shift_lfps.append(shift_lfp)
+            shift_events.append(shift_event)
+            found_fit = True
+        else:
+            found_fit = False
+
+        return found_fit
+
+    def find_ipi_fit(lfp_synctimes_diff,
+                     event_synctimes_diff,
+                     **kws):
+        """Try to find a good event-to-LFP inter-pulse interval fit.
+
+        Tests a range of index shifts between event and LFP IPI vectors
+        and returns True when an acceptable fit is found, returning False
+        if no fit is found after all shifts have been tested.
+        """
+        n_syncs = np.min((len(lfp_synctimes_diff), len(event_synctimes_diff)))
+        shifts = alternate_2col(np.min((n_syncs-(step+1), max_shift)))
+        for ii in range(len(shifts)):
+            shift_lfp, shift_event = shifts[ii, :]
+            found_fit = eval_ipi_fit(lfp_synctimes_diff,
+                                     event_synctimes_diff,
+                                     shift_lfp,
+                                     shift_event,
+                                     **kws)
+            if found_fit:
+                break
+
+        return found_fit
+    
+    # Get the inter-pulse intervals.
+    lfp_synctimes_diff = np.diff(lfp_synctimes)
+    event_synctimes_diff = np.diff(event_synctimes)
+    
+    # Iterate over input sync time vectors until we reach the end of one.
+    global shift_lfps
+    global shift_events
+    slides = alternate_2col(max_slide)
+    lfp_synctimes_adj = []
+    event_synctimes_adj = []
+    shift_lfps = []
+    shift_events = []
+    loop = 0
+    while np.min((len(lfp_synctimes_diff), len(event_synctimes_diff))) > (max_slide + step + 1):
+        for ii in range(len(slides)):
+            slide_lfp, slide_event = slides[ii, :]
+            found_fit = find_ipi_fit(lfp_synctimes_diff[slide_lfp:],
+                                     event_synctimes_diff[slide_event:],
+                                     ipi_thresh=ipi_thresh)
+            if found_fit:
+                inc_lfp = slide_lfp + shift_lfps[-1]
+                inc_event = slide_event + shift_events[-1]
+
+                # Add sync times to the output vectors.
+                lfp_synctimes_adj += list(lfp_synctimes[inc_lfp:inc_lfp+step])
+                event_synctimes_adj += list(event_synctimes[inc_event:inc_event+step])
+
+                # Remove sync times from the input vectors.
+                lfp_synctimes = lfp_synctimes[inc_lfp+step:]
+                lfp_synctimes_diff = lfp_synctimes_diff[inc_lfp+step:]
+                event_synctimes = event_synctimes[inc_event+step:]
+                event_synctimes_diff = event_synctimes_diff[inc_event+step:]
+
+                break
+
+        if not found_fit:
+            if verbose:
+                print('Loop {}: Inter-sync times failed to converge'.format(loop))
+
+            # Jump ahead and try to keep going.
+            lfp_synctimes = lfp_synctimes[max_slide+step:]
+            lfp_synctimes_diff = lfp_synctimes_diff[max_slide+step:]
+            event_synctimes = event_synctimes[max_slide+step:]
+            event_synctimes_diff = event_synctimes_diff[max_slide+step:]
+
+        loop += 1
+
+    event_synctimes_adj = np.array(event_synctimes_adj)
+    lfp_synctimes_adj = np.array(lfp_synctimes_adj)
+    
+    if verbose:
+        print('Retained {} sync pulses'.format(len(lfp_synctimes_adj)))
+        
+    return event_synctimes_adj, lfp_synctimes_adj
 
 
 def read_events_json(subj_sess,

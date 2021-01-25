@@ -14,27 +14,21 @@ Functions for analyzing firing rate data within event windows.
 
 Last Edited
 ----------- 
-9/17/20
+11/27/20
 """
 import sys
 import os
-from glob import glob
 from collections import OrderedDict as od
-from time import sleep
-
+import warnings
 import mkl
 mkl.set_num_threads(1)
 import numpy as np
 import scipy.stats as stats
-from scipy.ndimage.filters import gaussian_filter
 import pandas as pd
-import h5py
-import scipy.io as sio
-
+from sklearn.preprocessing import minmax_scale
 from sklearn.model_selection import KFold
 from sklearn.svm import LinearSVC
 from sklearn.multiclass import OneVsRestClassifier
-
 sys.path.append('/home1/dscho/code/general')
 import data_io as dio
 
@@ -117,8 +111,9 @@ def calc_mean_fr_by_time(fr_by_time_bin_f,
     subj, sess = subj_sess.split('_')
     event_times = dio.open_pickle(fr_by_time_bin_f)['event_times']
     n_perm = event_times['fr_null'].iloc[0].shape[0]
-    game_states = [['Prepare1'], ['Delay1'], ['Encoding'], ['Prepare2'], ['Delay2'], ['Retrieval'],
-                   ['Prepare1', 'Prepare2'], ['Delay1', 'Delay2'], ['Encoding', 'Retrieval']]
+    # game_states = [['Prepare1'], ['Delay1'], ['Encoding'], ['Prepare2'], ['Delay2'], ['Retrieval'],
+    #                ['Prepare1', 'Prepare2'], ['Delay1', 'Delay2'], ['Encoding', 'Retrieval']]
+    game_states = [['Delay1'], ['Delay2']]
     cols = ['subj_sess', 'subj', 'sess', 'chan', 'unit', 'gameState', 
             'fr', 'z_fr', 'z_fr_max', 'z_fr_max_ind', 'tis', 'z_tis', 'pval']
     output = []
@@ -212,31 +207,31 @@ def classify_time_bins(spikes,
     return output
 
 
-def create_null_fr_trains(fr_train, event_times, n_perms=1):
-    """Create a null distribution of firing rates for a neuron.
+# def create_null_fr_trains(fr_train, event_times, n_perms=1):
+#     """Create a null distribution of firing rates for a neuron.
     
-    The firing rates within each event window are randomly circularly shifted
-    up to the length of the event window. This procedure is done n_perms times
-    to generate a null distribution in which firing rates are randomized across
-    trials, while the firing rate distribution and temporal structure is 
-    retained within each event.
+#     The firing rates within each event window are randomly circularly shifted
+#     up to the length of the event window. This procedure is done n_perms times
+#     to generate a null distribution in which firing rates are randomized across
+#     trials, while the firing rate distribution and temporal structure is 
+#     retained within each event.
     
-    By default we only do this once per function call (n_perms=1), since 
-    generating the whole null distribution at once would hit memory errors.
+#     By default we only do this once per function call (n_perms=1), since 
+#     generating the whole null distribution at once would hit memory errors.
     
-    Returns
-    -------
-    fr_train_null : np.ndarray
-        n_timepoints vector of circ-shifted firing rates if n_perms == 1 
-        or n_perms x n_timepoints array if n_perms > 1.
-    """
-    fr_train_null = np.array([np.concatenate(event_times['time'].apply(lambda x: shift_fr_train(x, fr_train)))
-                              for i in range(n_perms)]) # n_perms x len(fr_train)
+#     Returns
+#     -------
+#     fr_train_null : np.ndarray
+#         n_timepoints vector of circ-shifted firing rates if n_perms == 1 
+#         or n_perms x n_timepoints array if n_perms > 1.
+#     """
+#     fr_train_null = np.array([np.concatenate(event_times['time'].apply(lambda x: shift_fr_train(x, fr_train)))
+#                               for i in range(n_perms)]) # n_perms x len(fr_train)
                               
-    if n_perms == 1:
-        fr_train_null = np.squeeze(fr_train_null) # len(fr_train)
+#     if n_perms == 1:
+#         fr_train_null = np.squeeze(fr_train_null) # len(fr_train)
     
-    return fr_train_null
+#     return fr_train_null
 
 
 def fr_by_time_vs_null(fr_train,
@@ -314,7 +309,8 @@ def fr_by_time_vs_null(fr_train,
 
 
 def info_rate(fr_given_x, 
-              prob_x=None):
+              prob_x=None,
+              scale_minmax=False):
     """Return the information rate of a cell in bits/spike.
     
     From Skaggs et al., 1993.
@@ -332,8 +328,12 @@ def info_rate(fr_given_x,
     if prob_x is None:
         n_states = len(fr_given_x)
         prob_x = np.ones(n_states) / n_states
+    if scale_minmax:
+        fr_given_x = minmax_scale(fr_given_x)
     mean_fr = np.dot(prob_x, fr_given_x)
-    bits_per_spike = np.nansum(prob_x * (fr_given_x/mean_fr) * np.log2(fr_given_x/mean_fr))
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        bits_per_spike = np.nansum(prob_x * (fr_given_x/mean_fr) * np.log2(fr_given_x/mean_fr))
     return bits_per_spike
 
 

@@ -16,24 +16,22 @@ in Goldmine data.
 
 Last Edited
 ----------- 
-9/17/20
+12/11/20
 """
 import sys
 import os
 from glob import glob
 from collections import OrderedDict as od
-
 import mkl
 mkl.set_num_threads(1)
 import numpy as np
 from scipy.ndimage.filters import gaussian_filter1d
 import pandas as pd
 import scipy.io as sio
-
 sys.path.append('/home1/dscho/code/general')
 import data_io as dio
-sys.path.append('/home1/dscho/code/projects/time_cells')
-import spike_sorting
+sys.path.append('/home1/dscho/code/projects')
+from time_cells import spike_sorting
 
 
 def add_null_to_spikes(subj_sess,
@@ -46,10 +44,13 @@ def add_null_to_spikes(subj_sess,
                        split_files=True,
                        verbose=True):
     """Add spike times null distribution to the spikes DataFrame.
+
+    Operates on the output of format_spikes().
     
-    Contains all neurons in a session.
+    Creates a null distribution of randomly, circ-shifted spike times
+    within each trial phase, for all neurons in a session.
     """
-    # Look for existing output file.
+    # Check for existing output file.
     output_f = os.path.join(proj_dir, 'analysis', 'spikes', 
                             '{}-spikes.pkl'.format(subj_sess))
     if spikes is None:
@@ -379,6 +380,27 @@ def roi_lookup(subj_sess,
     return ''
 
 
+def roi_mapping():
+    """Return a dictionary of region acronyms to aggregate ROIs."""
+    rois = {'A': 'Amygdala',
+            'AC': 'Frontal',
+            'AH': 'Hippocampus',
+            'AI': 'Frontal',
+            'EC': 'EC',
+            'FOp': 'Frontal',
+            'FOP': 'Frontal',
+            'HGa': 'Temporal',
+            'MFG': 'Frontal',
+            'MH': 'Hippocampus',
+            'O': 'Parieto-occipital',
+            'OF': 'Frontal',
+            'PHG': 'Temporal',
+            'PI-SMG': 'Frontal',
+            'TO': 'Temporal',
+            'TPO': 'Parieto-occipital'}
+    return rois
+
+
 def shift_spike_inds(spike_inds, 
                      step, 
                      floor=0, 
@@ -422,6 +444,8 @@ def spike_times_to_fr(spike_times,
     Time is assumed to start at 0 ms. Each value 
     in the output vector corresponds to 1 ms. 
     
+    If simga == 0, returns the spike train instead of firing rate.
+
     Parameters
     ----------
     spike_times : np.ndarray
@@ -445,8 +469,11 @@ def spike_times_to_fr(spike_times,
     elif len(shp) == 2:
         spike_train = np.array([spike_times_to_train(spike_times[x, :], stop_time)
                                 for x in range(shp[0])])
-    fr = gaussian_filter1d(spike_train, sigma, mode='reflect', axis=-1) * 1e3  # convert ms to s
-    return fr
+    if sigma > 0:
+        fr = gaussian_filter1d(spike_train, sigma, mode='reflect', axis=-1) * 1e3  # convert ms to s
+        return fr
+    else:
+        return spike_train
 
 
 def spike_times_to_train(spike_times,

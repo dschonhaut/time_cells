@@ -15,15 +15,15 @@ when reviewing spike sorting results.
 
 Last Edited
 ----------- 
-9/17/20
+10/5/20
 """
 import os
 from collections import OrderedDict as od
-
+import mkl
+mkl.set_num_threads(1)
 import numpy as np
 from scipy.io import loadmat
 import h5py
-
 import matplotlib.pyplot as plt
 import seaborn as sns
 import matplotlib as mpl
@@ -36,15 +36,15 @@ mpl.rcParams['axes.axisbelow'] = True
 mpl.rcParams['figure.subplot.wspace'] = 0.25 
 mpl.rcParams['figure.subplot.hspace'] = 0.25 
 
-n = 4
-c = 2
-colors = [sns.color_palette('Blues', n)[c], 
-          sns.color_palette('Reds', n)[c], 
-          sns.color_palette('Greens', n)[c],
-          sns.color_palette('Purples', n)[c],
-          sns.color_palette('Oranges', n)[c],
-          sns.color_palette('Greys', n)[c],
-          sns.color_palette('YlOrBr', n+3)[c],
+n_ = 4
+c_ = 2
+colors = [sns.color_palette('Blues', n_)[c_], 
+          sns.color_palette('Reds', n_)[c_], 
+          sns.color_palette('Greens', n_)[c_],
+          sns.color_palette('Purples', n_)[c_],
+          sns.color_palette('Oranges', n_)[c_],
+          sns.color_palette('Greys', n_)[c_],
+          sns.color_palette('YlOrBr', n_+3)[c_],
           'k']
 
 
@@ -162,6 +162,7 @@ def load_lfp_timestamps(subj_sess=None,
         print('File does not exist.')
         return None
 
+
 def load_montage(elec_montage_f,
                  verbose=True):
     """Return an OrderedDict of channels for each region."""
@@ -253,7 +254,7 @@ def plot_neuron3(wave_clus,
     Parameters
     ----------
     wave_clus : dict
-        Created by .
+        Created by compile_wave_clus()
     neuron : str
         Key to spikes.
         
