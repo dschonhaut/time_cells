@@ -416,10 +416,12 @@ def format_events(subj_sess=None,
     pause_inds = [idx for idx, row in events.query("(key=='gamePaused')").iterrows()
                   if row['value']['pauseType'] == 'manualPause']
     for idx in pause_inds:
+        trial = events.iloc[idx]['trial']
         game_state = events.iloc[idx]['gameState']
         if game_state in timed_game_states:
-            events.loc[(events['trial'] == trial) & (
-                events['gameState'] == game_state), 'bad_trials'] = 'paused'
+            # events.loc[(events['trial'] == trial) & (
+            #     events['gameState'] == game_state), 'bad_trials'] = 'paused'
+            events.loc[(events['trial'] == trial), 'bad_trials'] = 'paused'
 
     # Remove bad trial periods.
     if verbose:
