@@ -14,7 +14,7 @@ Functions for reading and processing Goldmine event logfiles.
 
 Last Edited
 ----------- 
-12/4/20
+2/10/20
 """
 import sys
 import os
@@ -103,32 +103,35 @@ def align_sync_pulses(event_synctimes,  # vector of event sync times
 
 def create_event_time_bins(subj_sess,
                            events=None,
-                           game_states=['Prepare1', 'Delay1', 'Encoding',
-                                        'Prepare2', 'Delay2', 'Retrieval'],
+                           game_states=['Delay1', 'Encoding', 'Delay2', 'Retrieval'],
+                           time_bin_dur=500,
+                           remove_trials=[],
                            proj_dir='/home1/dscho/projects/time_cells',
-                           overwrite=False,
-                           save_output=True,
                            verbose=False):
     """Break up event windows into evenly spaced time bins.
 
     Time bins are 500 ms each.
-    """
-    # Look for existing output file.
-    output_f = os.path.join(proj_dir, 'analysis', 'events', 'event_times',
-                            '{}-event_times.pkl'.format(subj_sess))
-    if os.path.exists(output_f) and not overwrite:
-        print('Found event_times')
-        event_times = dio.open_pickle(output_f)
-        return event_times
 
+    Parameters
+    ----------
+    subj_sess : str
+        e.g. 'U518_ses0'
+    events : pd.DataFrame
+        Returned by format_events()
+    game_states : list[str]
+        Game states to include in the output DataFrame.
+    time_bin_dur : int
+        Exact duration of each time bin within each trial phase, in ms.
+    remove_trials : list[int]
+        A list of trials to remove from event_times.
+    """
     # Load events.
     if events is None:
         events = dio.open_pickle(os.path.join(proj_dir, 'analysis', 'events',
                                               '{}-events_formatted.pkl'.format(subj_sess)))
 
     # Only select game states that were actually present in the experiment.
-    game_states = [x for x in game_states 
-                   if x in np.unique(events['gameState'])]
+    game_states = [x for x in game_states if x in np.unique(events['gameState'])]
 
     # Get the event time windows for each game state.
     dfs = []
@@ -140,33 +143,23 @@ def create_event_time_bins(subj_sess,
     event_times.insert(0, 'subj_sess', subj_sess)
     event_times['duration'] = event_times['time'].apply(lambda x: x[-1]-x[0])
 
-    # Divide each task period into 60 time bins of equal duration
-    # (should be ~500 ms each)
+    # Divide each trial phase into equal-length time bins that are exactly time_bin_dur long and
+    # go up to the trial phase duration specified by get_game_state_durs().
+    game_state_durs = get_game_state_durs()
     time_bins = []
     for idx, row in event_times.iterrows():
-        if row['gameState'] in ['Encoding', 'Retrieval']:
-            n_time_bins = 60
-            time_bins.append(np.linspace(
-                row['time'][0], row['time'][1], num=n_time_bins + 1))
-        elif row['gameState'] in ['Delay1', 'Delay2']:
-            n_time_bins = 20
-            time_bins.append(np.linspace(
-                row['time'][0], row['time'][1], num=n_time_bins + 1))
-        elif row['gameState'] in ['Prepare1', 'Prepare2']:
-            n_time_bins = 4
-            time_bins.append(np.linspace(
-                row['time'][0], row['time'][1], num=n_time_bins + 1))
-        else:
-            raise Exception("gameState '{}' not recognized".format(row['gameState']))
-    
+        assert row['duration'] >= game_state_durs[row['gameState']]
+        time_bins.append(np.arange(row['time'][0], 
+                                   row['time'][0] + game_state_durs[row['gameState']] + 1, 
+                                   step=time_bin_dur))
     event_times['time_bins'] = time_bins
     event_times['n_time_bins'] = event_times['time_bins'].apply(lambda x: len(x) - 1)
-    event_times['time_bin_duration'] = event_times['time_bins'].apply(lambda x: np.median(np.diff(x)))
     event_times = event_times.sort_values(['trial', 'trial_phase']).reset_index(drop=True)
 
-    # Save event times.
-    if save_output:
-        dio.save_pickle(event_times, output_f, verbose)
+    # Remove excluded trials.
+    if remove_trials:
+        event_times = (event_times.query("(trial!={})".format(list(remove_trials)))
+                                  .reset_index(drop=True))
 
     return event_times
 
@@ -297,38 +290,42 @@ def find_pulse_starts(sync_chan,
     return pulse_startinds
 
 
-def find_sync_shift(event_synctimes,  # vector of event sync times
-                    lfp_synctimes,  # vector of LFP sync times in ms
-                    verbose=True):
-    """Find the best circ-shift index to apply to lfp_synctimes.
+# def find_sync_shift(event_synctimes,  # vector of event sync times
+#                     lfp_synctimes,  # vector of LFP sync times in ms
+#                     verbose=True):
+#     """Find the best circ-shift index to apply to lfp_synctimes.
     
-    Finds the max correlation between event_synctimes and lfp_synctimes
-    inter-pulse intervals at all possible circular shifts.
-    """
-    # Find the best starting fit between event and LFP sync times
-    # by comparing the inter-pulse intervals for each, testing
-    # LFP sync shifts at different rolling indices.
-    min_syncs = np.min((len(event_synctimes), len(lfp_synctimes)))
-    lfp_synctimes_diff = np.diff(lfp_synctimes[:min_syncs])
-    event_synctimes_diff = np.diff(event_synctimes[:min_syncs])
-    offsets = np.arange(-(min_syncs-2), 1)
-    rvals = np.array([stats.pearsonr(np.roll(lfp_synctimes_diff, offset), event_synctimes_diff)[0]
-                      for offset in offsets])
-    shift_by = offsets[rvals.argmax()]
+#     Finds the max correlation between event_synctimes and lfp_synctimes
+#     inter-pulse intervals at all possible circular shifts.
+#     """
+#     # Find the best starting fit between event and LFP sync times
+#     # by comparing the inter-pulse intervals for each, testing
+#     # LFP sync shifts at different rolling indices.
+#     min_syncs = np.min((len(event_synctimes), len(lfp_synctimes)))
+#     lfp_synctimes_diff = np.diff(lfp_synctimes[:min_syncs])
+#     event_synctimes_diff = np.diff(event_synctimes[:min_syncs])
+#     offsets = np.arange(-(min_syncs-2), 1)
+#     rvals = np.array([stats.pearsonr(np.roll(lfp_synctimes_diff, offset), event_synctimes_diff)[0]
+#                       for offset in offsets])
+#     shift_by = offsets[rvals.argmax()]
     
-    if verbose:
-        print('Shift by {}'.format(shift_by))
-        print('Max r = {:.3f}'.format(rvals.max()))
-        print('Stdev r = {:.3f}'.format(rvals.std()))
+#     if verbose:
+#         print('Shift by {}'.format(shift_by))
+#         print('Max r = {:.3f}'.format(rvals.max()))
+#         print('Stdev r = {:.3f}'.format(rvals.std()))
     
-    output = od([('offsets', offsets),
-                 ('rvals', rvals),
-                 ('shift_by', shift_by)])
-    return output
+#     output = od([('offsets', offsets),
+#                  ('rvals', rvals),
+#                  ('shift_by', shift_by)])
+#     return output
 
 
 def format_events(subj_sess=None,
                   events=None,
+                  noisy_trials=[],
+                  remove_incomplete_trials=True,
+                  remove_noisy_trials=False,
+                  remove_paused_trials=False,
                   overwrite=False,
                   save_output=True,
                   proj_dir='/home1/dscho/projects/time_cells',
@@ -360,7 +357,7 @@ def format_events(subj_sess=None,
     events['scene'] = fill_column(events, 'loadScene', 'sceneName', fill_back=False)
 
     # Get the main experiment events (dropping the tutorial events).
-    events = events.loc[events['scene']==experiment_scene].reset_index(drop=True).copy()
+    events = events.loc[events['scene']==experiment_scene].reset_index(drop=True)
 
     # Add column for game states.
     events['gameState'] = fill_column(events, 'gameState', 'stateName', fill_back=False)
@@ -398,7 +395,7 @@ def format_events(subj_sess=None,
                        (events['trial'] == trial) &
                        (events['gameState'] == game_state), 'gameState'] = game_state + '2'
 
-    # Take note of which trial periods should be thrown out.
+    # Take note of which trial periods should be flagged or thrown out.
     events['bad_trials'] = ''
 
     # Flag incomplete trials.
@@ -406,31 +403,55 @@ def format_events(subj_sess=None,
                          'Delay2', 'Retrieval', 'ReturnToBase2', 'DoNextTrial']
     events.loc[(events['trial'] == 0), 'bad_trials'] = 'incomplete'
     for trial in range(1, events['trial'].max() + 1):
-        game_states = list(
-            events.loc[(events['trial'] == trial), 'gameState'].unique())
+        game_states = list(events.loc[(events['trial'] == trial), 'gameState'].unique())
         if not np.all([x in game_states for x in check_game_states]):
             events.loc[(events['trial'] == trial), 'bad_trials'] = 'incomplete'
+    if verbose:
+        print('Incomplete trials:')
+        print(events.query("bad_trials=='incomplete'")
+                    .groupby(['trial', 'gameState'])['time']
+                    .apply(lambda x: np.max(x) - np.min(x)), end='\n\n')
+
+    if remove_incomplete_trials:
+        if verbose:
+            print('Removing incomplete trials...', end='\n\n')    
+        events = events.loc[events['bad_trials'] != 'incomplete'].reset_index(drop=True)
+
+    # Flag noisy trials (must be manually specified).
+    for trial in noisy_trials:
+        events.loc[(events['trial'] == trial), 'bad_trials'] = 'noisy'
+    if verbose:
+        print('Noisy trials:')
+        print(events.query("bad_trials=='noisy'")
+                    .groupby(['trial', 'gameState'])['time']
+                    .apply(lambda x: np.max(x) - np.min(x)), end='\n\n')
+
+    if remove_noisy_trials:
+        if verbose:
+            print('Removing noisy trials...', end='\n\n')    
+        events = events.loc[events['bad_trials'] != 'noisy'].reset_index(drop=True)
 
     # Flag trial periods with manual pauses.
-    timed_game_states = ['Delay1', 'Encoding', 'Delay2', 'Retrieval']
+    check_game_states = ['Delay1', 'Encoding', 'ReturnToBase1',
+                         'Delay2', 'Retrieval', 'ReturnToBase2']
     pause_inds = [idx for idx, row in events.query("(key=='gamePaused')").iterrows()
                   if row['value']['pauseType'] == 'manualPause']
     for idx in pause_inds:
-        trial = events.iloc[idx]['trial']
-        game_state = events.iloc[idx]['gameState']
-        if game_state in timed_game_states:
-            # events.loc[(events['trial'] == trial) & (
-            #     events['gameState'] == game_state), 'bad_trials'] = 'paused'
-            events.loc[(events['trial'] == trial), 'bad_trials'] = 'paused'
-
-    # Remove bad trial periods.
+        trial = events.loc[idx]['trial']
+        game_state = events.loc[idx]['gameState']
+        if game_state in check_game_states:
+            events.loc[(events['trial'] == trial) & (events['gameState'] == game_state), 
+                       'bad_trials'] = 'paused'
     if verbose:
-        print('Removing incomplete trials and trials with a manual pause...', end='\n\n')
-        print(events.query("bad_trials!=''")
-                    .groupby(['trial', 'gameState'])['bad_trials']
-                    .apply(lambda x: np.unique(x)), end='\n\n')
+        print('Paused trials:')
+        print(events.query("bad_trials=='paused'")
+                    .groupby(['trial', 'gameState'])['time']
+                    .apply(lambda x: np.max(x) - np.min(x)), end='\n\n')
 
-    events = events.loc[events['bad_trials'] == ''].reset_index(drop=True)
+    if remove_paused_trials:
+        if verbose:
+            print('Removing trials with a manual pause...', end='\n\n')
+        events = events.loc[events['bad_trials'] != 'paused'].reset_index(drop=True)
 
     # Other changes to events go here.
     events = edit_events(events)
@@ -489,6 +510,23 @@ def game_state_intervals(exp_df,
                                                              exp_df.loc[x[1], col]])
 
     return output_df
+
+
+def get_excluded_trials(subj_sess):
+    """Store hard-coded trials to remove from all analysis."""
+    remove = {'U518_ses1': [31]}
+    return remove.get(subj_sess, [])
+
+
+def get_game_state_durs():
+    """Return the duration of each game state in ms."""
+    game_state_durs = {'Prepare1': 2000,
+                       'Delay1': 10000,
+                       'Encoding': 30000,
+                       'Prepare2': 2000,
+                       'Delay2': 10000,
+                       'Retrieval': 30000}
+    return game_state_durs
 
 
 def get_trial_inds(df):
@@ -776,38 +814,6 @@ def rmse(v1,
     """
     err = v1 - v2
     return np.sqrt(np.dot(err, err)/len(err))
-
-
-def shift_spike_inds(spike_inds, 
-                     step, 
-                     floor=0, 
-                     ceiling=np.inf):
-    """Return the time-shifted spike_inds array.
-    
-    Parameters
-    ----------
-    spike_inds : np.ndarray
-        Array of spike time indices.
-    floor : int
-        The lowest spike index before rolling backward from stop.
-    ceiling : int
-        One above highest spike index before rolling forward from start.
-    step : int
-        Number of indices to shift the spike train by.
-    """
-    ceiling -= floor
-    spike_inds_shifted = (spike_inds-floor) + step
-    
-    if step < 0:
-        roll_by = -len(spike_inds_shifted[spike_inds_shifted<0])
-        spike_inds_shifted[spike_inds_shifted<0] = spike_inds_shifted[spike_inds_shifted<0] + ceiling
-    else:
-        roll_by = len(spike_inds_shifted[spike_inds_shifted>=ceiling])
-        spike_inds_shifted[spike_inds_shifted>=ceiling] = spike_inds_shifted[spike_inds_shifted>=ceiling] - ceiling
-
-    spike_inds_shifted = np.roll(spike_inds_shifted, roll_by) + floor
-
-    return spike_inds_shifted
 
 
 def trial_intervals(exp_df,

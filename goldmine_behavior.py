@@ -11,7 +11,7 @@ Description:
     Analyze and plot Goldmine behavioral results from event logs.
 
 Last Edited: 
-    11/29/20
+    2/10/21
 """
 import sys
 import os.path as op
@@ -146,13 +146,21 @@ class Events(object):
                                                    save_output=False,
                                                    proj_dir=self.proj_dir,
                                                    verbose=False)
+        self.trials = list(self.events['trial'].unique())
+        self.bad_trials = list(np.unique(self.events.query("(bad_trials!='')")['trial'].unique().tolist() + 
+                                         events_preproc.get_excluded_trials(self.subj_sess)))
+        self.keep_trials = [trial for trial in self.trials if trial not in self.bad_trials]
+        self.bad_trial_phases = (self.events.query("(bad_trials!='')")[['trial', 'gameState']]
+                                            .drop_duplicates()
+                                            .groupby('trial')['gameState']
+                                            .apply(lambda x: list(np.unique(x)))
+                                            .reset_index().values.tolist()) # e.g. [[1, ['Delay1']], [4, ['Delay2', 'Retrieval']]]
         self.event_times = events_preproc.create_event_time_bins(self.subj_sess,
                                                                  events=self.events,
-                                                                 overwrite=True,
-                                                                 save_output=False,
+                                                                 remove_trials=self.bad_trials,
                                                                  verbose=False)
-        self.trials = list(self.events['trial'].unique())
-        self.time_penalty = self.events("(key=='trialComplete')").set_index('trial')['time_penalty']
+        self.time_penalty = (self.events.query("(key=='trialComplete')")
+                                        .set_index('trial')['time_penalty'])
         self.maze_name = self.events.iloc[0]['scene']
         self.maze = Maze(self.maze_name)
         self.set_plot_params(reset=True)
@@ -283,12 +291,12 @@ class Events(object):
         cols = ['gameState', 'trial', 'time', 'time_penalty', 'dur', 'pos',
                 'maze_idx', 'rotation', 'head_direc', 'maze_idx_hd',
                 'moved_rawpos', 'moved_pos', 'moved_hd', 'moved_pos_or_hd']
-
         positions = od([])
         for col in cols:
             positions[col] = []
         for idx, df in (self.events
-                        .query("(key=='playerTransform') & (gameState=={})".format(game_states))
+                        .query("(trial=={}) & (gameState=={}) & (key=='playerTransform')"
+                               .format(self.keep_trials, game_states))
                         .groupby(['gameState', 'trial'])):
             gameState, trial = idx
             
@@ -358,7 +366,7 @@ class Events(object):
             select_neg = list(dig_events[dig_events.apply(lambda x: not x['successful'])].index)
 
             digacc_by_trial = []
-            for trial in self.trials:
+            for trial in self.keep_trials:
                 n_succ = len(self.events.loc[select_pos].query("(trial=={})".format(trial)))
                 n_fail = len(self.events.loc[select_neg].query("(trial=={})".format(trial)))
                 if n_succ + n_fail > 0:
@@ -378,14 +386,14 @@ class Events(object):
         # Generate the plot.
         if ax is None:
             ax = plt.gca()
-        ax.plot(np.arange(len(self.trials)), digacc_by_trial, marker='X',
+        ax.plot(np.arange(len(self.keep_trials)), digacc_by_trial, marker='X',
                 markeredgewidth=0.4, markeredgecolor='k', 
                 markersize=10, linewidth=0, **kws)
         if add_gaussian:
-            ax.plot(np.arange(len(self.trials)), digacc_by_trial_smooth, color='k', linewidth=1.2, 
+            ax.plot(np.arange(len(self.keep_trials)), digacc_by_trial_smooth, color='k', linewidth=1.2, 
                     zorder=0)
-        ax.set_xticks(np.arange(0, len(self.trials)+1, 6, dtype=int))
-        ax.set_xticklabels(np.arange(0, len(self.trials)+1, 6, dtype=int), 
+        ax.set_xticks(np.arange(0, len(self.keep_trials)+1, 6, dtype=int))
+        ax.set_xticklabels(np.arange(0, len(self.keep_trials)+1, 6, dtype=int), 
                            fontsize=self.plot_params['font']['tick'])
         ax.set_ylim([-5, 105])
         ax.set_yticks(np.linspace(0, 100, 6))
@@ -417,7 +425,7 @@ class Events(object):
         """
         def get_gold_by_trial():
             gold_by_trial = []
-            for trial in self.trials:
+            for trial in self.keep_trials:
                 gold_by_trial.append(len(self.events.loc[select].query("(trial=={})".format(trial))))
             gold_by_trial = np.cumsum(gold_by_trial)
             return gold_by_trial
@@ -426,20 +434,14 @@ class Events(object):
         select = list(events_score[events_score.apply(lambda x: x['scoreChange']==10)].index)
 
         ## ADD CODE FOR GOLD FOUND
-        
         gold_by_trial = get_gold_by_trial()
-
-        # gold_by_trial = []
-        # for trial in self.trials:
-        #     gold_by_trial.append(len(self.events.loc[select].query("(trial=={})".format(trial))))
-        # gold_by_trial = np.cumsum(gold_by_trial)
 
         # Generate the plot.
         if ax is None:
             ax = plt.gca()
-        ax.plot(np.arange(len(self.trials)), gold_by_trial, linewidth=2, **kws)
-        ax.set_xticks(np.arange(0, len(self.trials)+1, 6, dtype=int))
-        ax.set_xticklabels(np.arange(0, len(self.trials)+1, 6, dtype=int), 
+        ax.plot(np.arange(len(self.keep_trials)), gold_by_trial, linewidth=2, **kws)
+        ax.set_xticks(np.arange(0, len(self.keep_trials)+1, 6, dtype=int))
+        ax.set_xticklabels(np.arange(0, len(self.keep_trials)+1, 6, dtype=int), 
                            fontsize=self.plot_params['font']['tick'])
         ax.set_ylim([0, 50])
         ax.set_yticks(np.arange(0, 51, 10, dtype=np.int))
