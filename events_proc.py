@@ -152,7 +152,8 @@ class Events(object):
             Game states to include in the output DataFrame.
         """
         # Get the event time windows for each game state.
-        game_states=['Delay1', 'Encoding', 'ReturnToBase1', 'Delay2', 'Retrieval', 'ReturnToBase2']
+        game_states = ['Delay1', 'Encoding', 'ReturnToBase1', 
+                       'Delay2', 'Retrieval', 'ReturnToBase2']
         dfs = []
         for iState, game_state in enumerate(game_states):
             dfs.append(self._game_state_intervals(self.events, game_state=game_state, cols=['time']))
@@ -178,6 +179,10 @@ class Events(object):
         event_times['time_bins'] = time_bins
         event_times['time_bin_dur'] = event_times['time_bins'].apply(lambda x: 0 if len(x)==0 else x[-1] - x[0])
         event_times['n_time_bins'] = event_times['time_bins'].apply(lambda x: np.max((len(x) - 1, 0)))
+
+        # Assign game_state categories a specific order.
+        game_state_cat = pd.CategoricalDtype(game_states, ordered=True)
+        event_times['gameState'] = event_times['gameState'].astype(game_state_cat)
 
         # Remove excluded trials.
         _trials = self.keep_trials if self.remove_bad_trials else self.trials
@@ -267,6 +272,12 @@ class Events(object):
         events_behav = (pd.DataFrame(events_behav, columns=cols)
                         .sort_values('start_time')
                         .reset_index(drop=True))
+
+        # Assign game_state categories a specific order.
+        game_states = ['Delay1', 'Encoding', 'ReturnToBase1', 
+                       'Delay2', 'Retrieval', 'ReturnToBase2']
+        game_state_cat = pd.CategoricalDtype(game_states, ordered=True)
+        events_behav['gameState'] = events_behav['gameState'].astype(game_state_cat)
 
         self.events_behav = events_behav
 

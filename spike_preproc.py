@@ -16,10 +16,10 @@ in Goldmine data.
 
 Last Edited
 ----------- 
-12/11/20
+3/5/21
 """
 import sys
-import os
+import os.path as op
 from glob import glob
 from collections import OrderedDict as od
 import mkl
@@ -32,6 +32,37 @@ sys.path.append('/home1/dscho/code/general')
 import data_io as dio
 sys.path.append('/home1/dscho/code/projects')
 from time_cells import spike_sorting
+
+
+def load_spikes(subj_sess,
+                neuron,
+                proj_dir='/home1/dscho/projects/time_cells'):
+    """Load spike info for the selected neuron.
+
+    Parameters
+    ----------
+    subj_sess : str
+        e.g. 'U518_ses0'
+    neuron : str
+        e.g. '17-1' is channel 17, unit 1.
+
+    Returns
+    -------
+    spikes : Series
+    """
+    chan, unit = neuron.split('-')
+    filename = op.join(proj_dir, 'analysis', 'spikes', 
+                       '{}-CSC{}-unit{}-spikes.pkl'.format(subj_sess, chan, unit))
+    spikes = dio.open_pickle(filename)
+    return spikes
+
+
+def unit_from_file(file):
+    """Return unique unit name from the spike file name."""
+    _, chan, unit, _ = op.basename(file).split('-')
+    chan = chan.replace('CSC', '')
+    unit = unit.replace('unit', '')
+    return '{}-{}'.format(chan, unit)
 
 
 def add_null_to_spikes(subj_sess,
@@ -51,8 +82,8 @@ def add_null_to_spikes(subj_sess,
     within each trial phase, for all neurons in a session.
     """
     # Check for existing output file.
-    output_f = os.path.join(proj_dir, 'analysis', 'spikes', 
-                            '{}-spikes.pkl'.format(subj_sess))
+    output_f = op.join(proj_dir, 'analysis', 'spikes', 
+                       '{}-spikes.pkl'.format(subj_sess))
     if spikes is None:
         spikes = dio.open_pickle(output_f)
     
@@ -63,7 +94,7 @@ def add_null_to_spikes(subj_sess,
         # Split files will save one file per neuron (as a pandas Series);
         # otherwise all neurons in a session are saved in a DataFrame together.
         if split_files:
-            output_f = os.path.join(proj_dir, 'analysis', 'spikes', '{}-CSC{}-unit{}-spikes.pkl')
+            output_f = op.join(proj_dir, 'analysis', 'spikes', '{}-CSC{}-unit{}-spikes.pkl')
             for idx, row in spikes.iterrows():
                 dio.save_pickle(row, output_f.format(row['subj_sess'], row['chan'], row['unit']), verbose)
         else:
@@ -209,10 +240,10 @@ def event_fr(spikes,
         spikes = spikes.iloc[iUnit]
 
     # Load the output file if it exists.
-    output_f = os.path.join(proj_dir, 'analysis', 'fr_by_time_bin',
-                            '{}-CSC{}-unit{}-event_fr.pkl'
-                            .format(spikes['subj_sess'], spikes['chan'], spikes['unit']))
-    if os.path.exists(output_f) and not overwrite:
+    output_f = op.join(proj_dir, 'analysis', 'fr_by_time_bin',
+                       '{}-CSC{}-unit{}-event_fr.pkl'
+                       .format(spikes['subj_sess'], spikes['chan'], spikes['unit']))
+    if op.exists(output_f) and not overwrite:
         return dio.open_pickle(output_f)
 
     # Get firing rates!
@@ -271,10 +302,9 @@ def format_spikes(subj_sess,
     spikes : pandas.core.frame.DataFrame
     """
     # Look for existing output file.
-    output_f = os.path.join(proj_dir, 'analysis', 'spikes', 
-                            '{}-spikes.pkl'.format(subj_sess))
+    output_f = op.join(proj_dir, 'analysis', 'spikes', '{}-spikes.pkl'.format(subj_sess))
     
-    if os.path.exists(output_f) and not overwrite:
+    if op.exists(output_f) and not overwrite:
         print('Found spikes')
         spikes = dio.open_pickle(output_f)
         return spikes
@@ -289,18 +319,18 @@ def format_spikes(subj_sess,
     session_dur = lfp_timestamps[-1] - lfp_timestamps[0]
 
     if add_montage_info:
-        elec_montage_f = os.path.join(proj_dir, 'data', subj, sess, 'micro_lfps', 'anatleads.txt')
-        assert os.path.exists(elec_montage_f)
+        elec_montage_f = op.join(proj_dir, 'data', subj, sess, 'micro_lfps', 'anatleads.txt')
+        assert op.exists(elec_montage_f)
 
     # Get all spike files for the session.
-    spike_files = np.array(glob(os.path.join(proj_dir, 'data', subj, sess, 'spikes',
-                                             spikes_dirname, 'times_CSC*.mat')))
+    spike_files = np.array(glob(op.join(proj_dir, 'data', subj, sess, 'spikes',
+                                        spikes_dirname, 'times_CSC*.mat')))
     assert len(spike_files) > 0
     if verbose:
         print('Found {} wave_clus files.'.format(len(spike_files)), end='\n\n')
     
     # Reorder spike files.
-    chans = np.array([np.int(os.path.basename(f).split('CSC')[1].split('.')[0])
+    chans = np.array([np.int(op.basename(f).split('CSC')[1].split('.')[0])
                       for f in spike_files])
     xsort = np.argsort(chans)
     spike_files = spike_files[xsort]
@@ -354,7 +384,7 @@ def format_spikes(subj_sess,
         # Split files will save one file per neuron (as a pandas Series);
         # otherwise all neurons in a session are saved in a DataFrame together.
         if split_files:
-            output_f = os.path.join(proj_dir, 'analysis', 'spikes', '{}-CSC{}-unit{}-spikes.pkl')
+            output_f = op.join(proj_dir, 'analysis', 'spikes', '{}-CSC{}-unit{}-spikes.pkl')
             for idx, row in spikes.iterrows():
                 dio.save_pickle(row, output_f.format(row['subj_sess'], row['chan'], row['unit']), verbose)
         else:
@@ -368,7 +398,7 @@ def roi_lookup(subj_sess,
                proj_dir='/home1/dscho/projects/time_cells'):
     """Given a channel, return the region."""
     subj, sess = subj_sess.split('_')
-    elec_montage_f = os.path.join(proj_dir, 'data', subj, sess, 'micro_lfps', 'anatleads.txt')
+    elec_montage_f = op.join(proj_dir, 'data', subj, sess, 'micro_lfps', 'anatleads.txt')
     with open(elec_montage_f, 'r') as f:
         mont = f.readlines()
     mont = [line.strip('\n').split(', ') for line in mont]

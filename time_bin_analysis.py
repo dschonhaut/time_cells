@@ -14,82 +14,435 @@ Functions for analyzing firing rate data within event windows.
 
 Last Edited
 ----------- 
-11/27/20
+3/5/21
 """
 import sys
-import os
+import os.path as op
+from glob import glob
 from collections import OrderedDict as od
+import itertools
 import warnings
 import mkl
 mkl.set_num_threads(1)
 import numpy as np
 import scipy.stats as stats
 import pandas as pd
+import statsmodels.api as sm
 from sklearn.preprocessing import minmax_scale
 from sklearn.model_selection import KFold
 from sklearn.svm import LinearSVC
 from sklearn.multiclass import OneVsRestClassifier
 sys.path.append('/home1/dscho/code/general')
 import data_io as dio
+sys.path.append('/home1/dscho/code/projects')
+from time_cells import events_proc, spike_preproc
 
 
-def calc_fr_by_time_bin(fr_train, 
-                        event_times, 
-                        game_states, 
-                        n_time_bins,
-                        random_shift=False):
-    """Return mean firing rate within each time bin, within each event.
+def lr_test(res_reduced, res_full):
+    """Run a likelihood ratio test comparing nested models.
     
     Parameters
     ----------
-    fr_train : numpy.ndarray
-        Vector of firing rates over the session, in ms.
-    event_times : pandas DataFrame
-    game_states : list or tuple
-        E.g. ['Delay1', 'Delay2']
-    n_time_bins : int
-        Firing rates within each event window will be evenly split into
-        this many time bins.
-    random_shift : bool
-        If True, firing rates will be randomly, circularly shifted
-        within each event window.
+    res_reduced : statsmodels results class
+        Results for the reduced model, which
+        must be a subset of the full model.
+    res_full : statsmodels results class
+        Results for the full model.
+        
+    Returns
+    -------
+    lr : float
+        The likelihood ratio.
+    df : int
+        Degrees of freedom, defined as the difference between
+        the number of parameters in the full vs. reduced models.
+    pval : float
+        P-value, or the area to the right of the likehood ratio
+        on the chi-squared distribution with df degrees of freedom.
+    """
+    lr = -2 * (res_reduced.llf - res_full.llf)
+    df = len(res_full.params) - len(res_reduced.params)
+    pval = stats.chi2.sf(lr, df)
+    
+    return lr, df, pval
+
+
+def glm_fit_unit(subj_sess,
+                 neuron,
+                 game_states=['Delay1', 'Delay2', 'Encoding', 'Retrieval'],
+                 n_perm=1000,
+                 proj_dir='/home1/dscho/projects/time_cells',
+                 filename=None,
+                 overwrite=False,
+                 save_output=True,
+                 verbose=False,
+                 **kwargs):
+    """Fit GLMs to predict firing rates for multiple game_states.
+    
+    **kwargs are passed to glm_fit().
+
+    Returns
+    -------
+    glm_res : DataFrame
+    """
+    # Load the output file if it exists.
+    if filename is None:
+        filename = op.join(proj_dir, 'analysis', 'behav_glms', 
+                           '{}-{}-glm_results.pkl'.format(subj_sess, neuron))
+    
+    if op.exists(filename) and not overwrite:
+        if verbose:
+            print('Loading from pickle.')
+        return dio.open_pickle(filename)
+
+    # Load the event_spikes dataframe.
+    event_spikes = load_event_spikes(subj_sess)
+
+    # Get the GLM fits.
+    warnings.filterwarnings('ignore')
+    model_fits = od([])
+    for game_state in game_states:
+        if verbose:
+            print('\tfitting {} GLMs...'.format(game_state))
+        model_fits[game_state] = glm_fit(neuron, 
+                                         event_spikes, 
+                                         game_state, 
+                                         n_perm=n_perm)
+    warnings.resetwarnings()
+
+    # Compare GLM results for preselected model contrasts, and store
+    # the results in a dataframe.
+    glm_res = _get_glm_res(subj_sess,
+                           neuron,
+                           model_fits)
+
+    # Save the glm_res dataframe.
+    if save_output:
+        dio.save_pickle(glm_res, filename, verbose)
+
+    return glm_res
+
+
+def glm_fit(neuron,
+            event_spikes,
+            game_state,
+            n_perm=0,
+            optimizer='lbfgs'):
+    """Fit firing rates using Poisson-link GLM.
+    
+    Parameters
+    ----------
+    neuron : str
+        e.g. '5-2' would be channel 5, unit 2
+    event_spikes : pd.DataFrame
+        behav_events dataframe with columns added for each neuron
+    game_state : str
+        Delay1, Encoding, Delay2, or Retrieval
+    n_perm : positive int
+        The number of permutations to include in a null mutation
+        spike counts (circ-shifted at random within each trial).
+    optimizer : str
+        The optimization algorithm to use for fitting model weights.
+        Default uses limited-memory BFGS, chosen because it is fast and
+        usually quite robust. 'nm' is a good alternative though if 
+        'lbfgs' has convergence problems.
     
     Returns
     -------
-    fr_by_time_bin : np.ndarray
-        n_event x n_time_bin array with the mean firing
-        rate during each time bin.
+    model_fits : dict[GLMResultsWrapper]
+        Contains model fits from real and shuffled spike data.
     """
-    def start_stop(time_window):
-        start, stop = time_window
-        start = int(np.round(start, 0))
-        stop = int(np.round(stop, 0))
-        return start, stop
+    # Get the data relevant time bins.
+    df = event_spikes.query("(gameState=='{}')".format(game_state))
+    cols = _get_behav_cols(event_spikes)
     
-    def event_mean_frs(time_window, 
-                       fr_train, 
-                       n_time_bins, 
-                       random_shift=False):
-        start, stop = time_window
-        fr_train_ = fr_train[start:stop]
-        if random_shift:
-            roll_by = int(np.random.rand() * (stop - start))
-            fr_train_ = np.roll(fr_train_, roll_by)
-        return [np.nanmean(x) for x in np.array_split(fr_train_, n_time_bins)]
+    # Independent variables are the dummy coded time steps and the intercept constant.
+    predictors = od([])
+    if game_state in ['Delay1', 'Delay2']:
+        predictors['time'] = cols['icpt'] + cols['time'] 
+        predictors['icpt'] = cols['icpt'] 
+
+    elif game_state in ['Encoding', 'Retrieval']:
+        predictors['time_place'] = cols['icpt'] + cols['time'] + cols['place'] 
+        predictors['place'] = cols['icpt'] + cols['place'] 
+        predictors['time'] = cols['icpt'] + cols['time']
         
-    # Get time windows for the game states of interest.    
-    time_wins = (event_times
-                 .query("(gameState=={})".format(game_states))['time']
-                 .apply(lambda x: start_stop(x)))
+        dig_col = []
+        if game_state == 'Retrieval':
+            dig_col += cols['dig_performed']
+        predictors['full']          = cols['icpt'] + cols['time'] + cols['place'] + cols['hd'] + cols['is_moving'] + cols['base_in_view'] + cols['gold_in_view'] + dig_col
+        predictors['full_subtime']  = cols['icpt']                + cols['place'] + cols['hd'] + cols['is_moving'] + cols['base_in_view'] + cols['gold_in_view'] + dig_col
+        predictors['full_subplace'] = cols['icpt'] + cols['time']                 + cols['hd'] + cols['is_moving'] + cols['base_in_view'] + cols['gold_in_view'] + dig_col
+        predictors['full_subhd']    = cols['icpt'] + cols['time'] + cols['place']              + cols['is_moving'] + cols['base_in_view'] + cols['gold_in_view'] + dig_col
+        predictors['full_subbiv']   = cols['icpt'] + cols['time'] + cols['place'] + cols['hd'] + cols['is_moving']                        + cols['gold_in_view'] + dig_col
+        predictors['full_subgiv']   = cols['icpt'] + cols['time'] + cols['place'] + cols['hd'] + cols['is_moving'] + cols['base_in_view']                        + dig_col
+
+    # Fit Poisson regressions.
+    res = od([])
+    y = df[neuron]
+    for mod_name in predictors.keys():
+        X = df[predictors[mod_name]].fillna(0)
+        res[mod_name] = sm.GLM(y, X, family=sm.families.Poisson()).fit(method=optimizer)
     
-    # Get the mean firing rate in each time bin, for each event.
-    fr_by_time_bin = np.array(time_wins.apply(lambda x: 
-                                              event_mean_frs(x, 
-                                                             fr_train, 
-                                                             n_time_bins, 
-                                                             random_shift))
-                                       .tolist())
-    return fr_by_time_bin
+    # Fit the same models to shuffled spike counts.
+    res_null = od({k: [] for k in predictors.keys()})
+    for iPerm in range(n_perm):
+        y = np.concatenate(df.groupby('trial')[neuron].apply(lambda x: list(_shift_spikes(x))).tolist())
+        for mod_name in predictors.keys():
+            X = df[predictors[mod_name]].fillna(0)
+            res_null[mod_name].append(sm.GLM(y, X, family=sm.families.Poisson()).fit(method=optimizer))
+        
+    model_fits = od({'obs': res, 'null': res_null})
+    return model_fits
+
+
+def spikes_per_timebin(events_behav,
+                       spike_times):
+    """Count how many spikes are in each time bin.
+    
+    Returns a pandas Series.
+    """
+    def count_spikes(row, spike_times):
+        start = row['start_time']
+        stop = row['stop_time']
+        return np.count_nonzero((spike_times >= start) & (spike_times < stop))
+
+    return events_behav.apply(lambda x: count_spikes(x, spike_times), axis=1)
+
+
+def load_event_spikes(subj_sess,
+                      proj_dir='/home1/dscho/projects/time_cells',
+                      filename=None,
+                      overwrite=False,
+                      save_output=True,
+                      verbose=True):
+    """Load the event_spikes dataframe."""
+    if filename is None:
+        filename = op.join(proj_dir, 'analysis', 'events', '{}-event_spikes.pkl'.format(subj_sess))
+
+    if op.exists(filename) and not overwrite:
+        if verbose:
+            print('Loading saved file.')
+        event_spikes = dio.open_pickle(filename)
+    else:
+        if verbose:
+            print('Creating event_spikes')
+        event_spikes = create_event_spikes(subj_sess,
+                                           proj_dir=proj_dir,
+                                           verbose=verbose)
+        if save_output:
+            dio.save_pickle(event_spikes, filename, verbose)
+
+    return event_spikes
+
+
+def create_event_spikes(subj_sess,
+                        proj_dir='/home1/dscho/projects/time_cells',
+                        verbose=True):
+    """Return the event spikes dataframe.
+    
+    event_spikes is an extension of the behav_events dataframe
+    (see events_proc.Events.log_events_behav) in which each row
+    contains behavioral variables for one 500ms time bin in a 
+    testing session. Here we add on a column for each neuron in
+    the session in which we count the number of spikes within each
+    time bin. 
+    
+    Also, categorical variable columns are one-hot-coded
+    in preparation to use event_spikes for regression model 
+    construction.
+    
+    Returns
+    -------
+    event_spikes : dataframe
+    """
+    events = events_proc.load_events(subj_sess,
+                                     proj_dir=proj_dir,
+                                     verbose=verbose,
+                                     run_all=True)
+    event_spikes = events.events_behav.copy()
+    
+    # Add an intercept column for regression fitting.
+    event_spikes['icpt'] = 1
+
+    # Format column values.
+    event_spikes['maze_region'] = event_spikes['maze_region'].apply(lambda x: x.replace(' ', '_'))
+    game_states = ['Delay1', 'Encoding', 'ReturnToBase1', 
+                   'Delay2', 'Retrieval', 'ReturnToBase2']
+    game_state_cat = pd.CategoricalDtype(game_states, ordered=True)
+    event_spikes['gameState'] = event_spikes['gameState'].astype(game_state_cat)
+
+    # Convert discrete value columns into one-hot-coded columns.
+    time_step_loc, time_step_vals = event_spikes.columns.tolist().index('time_step'), event_spikes['time_step'].tolist()
+    maze_region_loc, maze_region_vals = event_spikes.columns.tolist().index('maze_region'), event_spikes['maze_region'].tolist()
+    head_direc_loc, head_direc_vals = event_spikes.columns.tolist().index('head_direc'), event_spikes['head_direc'].tolist()
+    event_spikes = pd.get_dummies(event_spikes, prefix_sep='-',
+                                  prefix={'time_step': 'time', 'maze_region': 'place', 'head_direc': 'hd'}, 
+                                  columns=['time_step', 'maze_region', 'head_direc'])
+    event_spikes.insert(time_step_loc, 'time_step', time_step_vals)
+    event_spikes.insert(maze_region_loc, 'maze_region', maze_region_vals)
+    event_spikes.insert(head_direc_loc, 'head_direc', head_direc_vals)
+    
+    # Only count the base as being in view when player is outside the base.
+    event_spikes.loc[(event_spikes['place-Base']==1) & (event_spikes['base_in_view']==1), 'base_in_view'] = 0
+    
+    # Convert gold_in_view nans at Retrieval to 0.
+    event_spikes.loc[(event_spikes['gameState']=='Retrieval') & (np.isnan(event_spikes['gold_in_view'])), 'gold_in_view'] = 0
+
+    # Sort rows.
+    event_spikes = event_spikes.sort_values(['trial', 'gameState', 'time_bin']).reset_index(drop=True)
+    
+    # Get neurons from the session.
+    globstr = op.join(events.proj_dir, 'analysis', 'spikes', 
+                      '{}-*-spikes.pkl'.format(subj_sess))
+    spike_files = {spike_preproc.unit_from_file(_f): _f 
+                   for _f in glob(globstr)}
+    neurons = list(spike_files.keys())
+    if verbose:
+        print('{} neurons'.format(len(neurons)))
+    
+    # Add a column with spike counts for each neuron.
+    for neuron in neurons:
+        spike_times = dio.open_pickle(spike_files[neuron])['spike_times']
+        event_spikes[neuron] = spikes_per_timebin(event_spikes, spike_times)
+        
+    return event_spikes
+
+
+def event_spike_cols(event_spikes):
+    """Organize event_spikes columns into behavioral and neural ID lists."""
+    cols = _get_behav_cols(event_spikes)
+    
+    # Add an unnested version of all behavioral columns.
+    cols['behav'] = list(itertools.chain.from_iterable(cols.values()))
+    
+    # Add a column for neuron IDs.
+    cols['neurons'] = []
+    for col in event_spikes.columns:
+        # Neuron ID columns are stored like 'channel-unit';
+        # e.g. '16-2' is the second unit on channel 16.
+        try:
+            assert len([int(x) for x in col.split('-')]) == 2
+            cols['neurons'].append(col)
+        except (ValueError, AssertionError):
+            continue
+    
+    return cols
+
+
+def _get_glm_res(subj_sess,
+                 neuron,
+                 model_fits):
+    """Compare GLM fits between predefined model pairs.
+    
+    Parameters
+    ----------
+    subj_sess : str
+        e.g. 'U518_ses0'
+    neuron : str
+        e.g. '17-1' is channel 17, unit 1.
+    model_fits : dict
+        This is the output of glm_fit_unit().
+
+    Returns
+    -------
+    glm_res : DataFrame
+    """
+    # Find the names of all independent variables tested across models.
+    param_cols = []
+    for game_state in model_fits.keys():
+        for mod_name in model_fits[game_state]['obs'].keys():
+            param_cols += [param for param in model_fits[game_state]['obs'][mod_name].params.index
+                           if (param not in param_cols)]
+    
+    # Iterate over each constrast in the model comparison dataframe
+    # and add on the GLM fit variables.
+    model_comp = _get_model_comp()
+    model_output_cols = ['aic_diff', 'z_aic_diff', 'lr', 'df', 'chi_pval', 'emp_pval'] + param_cols
+    model_output = []
+    for iRow, row in model_comp.iterrows():
+        game_state = row['gameState']
+        full_mod = row['full']
+        reduced_mod = row['reduced']
+
+        # Get full model parameter weights.
+        params = od({k: np.nan for k in param_cols})
+        for k, v in model_fits[game_state]['obs'][full_mod].params.to_dict().items():
+            params[k] = v
+
+        # Get the difference between reduced and full model AICs.
+        # Better model fits are indicated by positive AIC_diff values.
+        aic_diff = (model_fits[game_state]['obs'][reduced_mod].aic - 
+                    model_fits[game_state]['obs'][full_mod].aic)
+        lr, df, chi_pval = lr_test(model_fits[game_state]['obs'][reduced_mod], 
+                                   model_fits[game_state]['obs'][full_mod])
+
+        # Get AIC diffs from the null distribution, 
+        # and use these to obtain an empirical p-value.
+        n_perm = len(model_fits[game_state]['null'][reduced_mod])
+        null_aic_diffs = np.array([model_fits[game_state]['null'][reduced_mod][iPerm].aic -
+                                   model_fits[game_state]['null'][full_mod][iPerm].aic
+                                   for iPerm in range(n_perm)])
+        null_mean = np.mean(null_aic_diffs)
+        null_std = np.std(null_aic_diffs)
+        z_aic_diff = (aic_diff - null_mean) / null_std
+        pval_ind = np.sum(null_aic_diffs >= aic_diff)
+        emp_pval = (pval_ind + 1) / (n_perm + 1)
+
+        # Add the results to the output dataframe.
+        model_output.append([aic_diff, z_aic_diff, lr, df, chi_pval, emp_pval] + list(params.values()))
+    
+    model_output = pd.DataFrame(model_output, columns=model_output_cols)
+    glm_res = pd.concat((model_comp, model_output), axis=1)
+    
+    # Add subj_sess and neuron identity columns.
+    glm_res.insert(0, 'subj_sess', subj_sess)
+    glm_res.insert(1, 'neuron', neuron)
+    
+    return glm_res
+
+
+def _get_model_comp():
+    """Define pairwise comparisons between full and reduced models."""
+    cols = ['gameState', 'testvar', 'reduced', 'full']
+    model_comp = [
+        ['Delay1', 'time', 'icpt', 'time'],
+        ['Delay2', 'time', 'icpt', 'time'],
+        ['Encoding', 'time', 'place', 'time_place'],
+        ['Encoding', 'place', 'time', 'time_place'],
+        ['Encoding', 'time', 'full_subtime', 'full'],
+        ['Encoding', 'place', 'full_subplace', 'full'],
+        ['Encoding', 'head_direc', 'full_subhd', 'full'],
+        ['Encoding', 'base_in_view', 'full_subbiv', 'full'],
+        ['Encoding', 'gold_in_view', 'full_subgiv', 'full'],
+        ['Retrieval', 'time', 'place', 'time_place'],
+        ['Retrieval', 'place', 'time', 'time_place'],
+        ['Retrieval', 'time', 'full_subtime', 'full'],
+        ['Retrieval', 'place', 'full_subplace', 'full'],
+        ['Retrieval', 'head_direc', 'full_subhd', 'full'],
+        ['Retrieval', 'base_in_view', 'full_subbiv', 'full'],
+        ['Retrieval', 'gold_in_view', 'full_subgiv', 'full']
+    ]
+    model_comp = pd.DataFrame(model_comp, columns=cols)
+    return model_comp
+
+
+def _get_behav_cols(event_spikes):
+    behav_cols = {'icpt': ['icpt'],
+                  'time': ['time-{}'.format(_i) for _i in range(1, 11)],
+                  'place': [col for col in event_spikes.columns if col.startswith('place-')],
+                  'hd': [col for col in event_spikes.columns if col.startswith('hd-')],
+                  'is_moving': ['is_moving'],
+                  'base_in_view': ['base_in_view'],
+                  'gold_in_view': ['gold_in_view'],
+                  'dig_performed': ['dig_performed']}
+    return behav_cols
+
+
+def _shift_spikes(spike_vec):
+    """Circularly shift spike vector."""
+    roll_by = np.random.randint(0, len(spike_vec))
+    return np.roll(spike_vec, roll_by)
 
 
 def calc_mean_fr_by_time(fr_by_time_bin_f,
@@ -98,12 +451,12 @@ def calc_mean_fr_by_time(fr_by_time_bin_f,
                          save_output=True,
                          verbose=True):
     """Calculate mean FR across trial phases of a given type."""
-    neuron = '-'.join(os.path.basename(fr_by_time_bin_f).split('-')[:3])
+    neuron = '-'.join(op.basename(fr_by_time_bin_f).split('-')[:3])
 
     # Load the output file if it exists.
-    output_f = os.path.join(proj_dir, 'analysis', 'fr_by_time_bin', 
-                            '{}-mean_fr_by_time.pkl'.format(neuron))
-    if os.path.exists(output_f) and not overwrite:
+    output_f = op.join(proj_dir, 'analysis', 'fr_by_time_bin', 
+                       '{}-mean_fr_by_time.pkl'.format(neuron))
+    if op.exists(output_f) and not overwrite:
         return dio.open_pickle(output_f)
 
     subj_sess, chan, unit = neuron.split('-')
@@ -160,9 +513,7 @@ def classify_time_bins(spikes,
                        n_perms=1000, 
                        save_as=None,
                        verbose=False):
-    """Train multiclass linear SVM to predict time bins from firing rates.
-    
-    """
+    """Predict time bins from firing rates using multiclass linear SVM."""
     do_shift = [False] + ([True] * n_perms)
     
     output = od([('obs', []), ('null', [])])
@@ -205,33 +556,6 @@ def classify_time_bins(spikes,
         dio.save_pickle(output, save_as, verbose)
 
     return output
-
-
-# def create_null_fr_trains(fr_train, event_times, n_perms=1):
-#     """Create a null distribution of firing rates for a neuron.
-    
-#     The firing rates within each event window are randomly circularly shifted
-#     up to the length of the event window. This procedure is done n_perms times
-#     to generate a null distribution in which firing rates are randomized across
-#     trials, while the firing rate distribution and temporal structure is 
-#     retained within each event.
-    
-#     By default we only do this once per function call (n_perms=1), since 
-#     generating the whole null distribution at once would hit memory errors.
-    
-#     Returns
-#     -------
-#     fr_train_null : np.ndarray
-#         n_timepoints vector of circ-shifted firing rates if n_perms == 1 
-#         or n_perms x n_timepoints array if n_perms > 1.
-#     """
-#     fr_train_null = np.array([np.concatenate(event_times['time'].apply(lambda x: shift_fr_train(x, fr_train)))
-#                               for i in range(n_perms)]) # n_perms x len(fr_train)
-                              
-#     if n_perms == 1:
-#         fr_train_null = np.squeeze(fr_train_null) # len(fr_train)
-    
-#     return fr_train_null
 
 
 def fr_by_time_vs_null(fr_train,
@@ -308,6 +632,65 @@ def fr_by_time_vs_null(fr_train,
     return output
 
 
+def calc_fr_by_time_bin(fr_train, 
+                        event_times, 
+                        game_states, 
+                        n_time_bins,
+                        random_shift=False):
+    """Return mean firing rate within each time bin, within each event.
+    
+    Parameters
+    ----------
+    fr_train : numpy.ndarray
+        Vector of firing rates over the session, in ms.
+    event_times : pandas DataFrame
+    game_states : list or tuple
+        E.g. ['Delay1', 'Delay2']
+    n_time_bins : int
+        Firing rates within each event window will be evenly split into
+        this many time bins.
+    random_shift : bool
+        If True, firing rates will be randomly, circularly shifted
+        within each event window.
+    
+    Returns
+    -------
+    fr_by_time_bin : np.ndarray
+        n_event x n_time_bin array with the mean firing
+        rate during each time bin.
+    """
+    def start_stop(time_window):
+        start, stop = time_window
+        start = int(np.round(start, 0))
+        stop = int(np.round(stop, 0))
+        return start, stop
+    
+    def event_mean_frs(time_window, 
+                       fr_train, 
+                       n_time_bins, 
+                       random_shift=False):
+        start, stop = time_window
+        fr_train_ = fr_train[start:stop]
+        if random_shift:
+            roll_by = int(np.random.rand() * (stop - start))
+            fr_train_ = np.roll(fr_train_, roll_by)
+        return [np.nanmean(x) for x in np.array_split(fr_train_, n_time_bins)]
+        
+    # Get time windows for the game states of interest.    
+    time_wins = (event_times
+                 .query("(gameState=={})".format(game_states))['time']
+                 .apply(lambda x: start_stop(x)))
+    
+    # Get the mean firing rate in each time bin, for each event.
+    fr_by_time_bin = np.array(time_wins.apply(lambda x: 
+                                              event_mean_frs(x, 
+                                                             fr_train, 
+                                                             n_time_bins, 
+                                                             random_shift))
+                                       .tolist())
+    return fr_by_time_bin
+
+
 def info_rate(fr_given_x, 
               prob_x=None,
               scale_minmax=False):
@@ -335,6 +718,33 @@ def info_rate(fr_given_x,
         warnings.simplefilter('ignore')
         bits_per_spike = np.nansum(prob_x * (fr_given_x/mean_fr) * np.log2(fr_given_x/mean_fr))
     return bits_per_spike
+
+
+# def create_null_fr_trains(fr_train, event_times, n_perms=1):
+#     """Create a null distribution of firing rates for a neuron.
+    
+#     The firing rates within each event window are randomly circularly shifted
+#     up to the length of the event window. This procedure is done n_perms times
+#     to generate a null distribution in which firing rates are randomized across
+#     trials, while the firing rate distribution and temporal structure is 
+#     retained within each event.
+    
+#     By default we only do this once per function call (n_perms=1), since 
+#     generating the whole null distribution at once would hit memory errors.
+    
+#     Returns
+#     -------
+#     fr_train_null : np.ndarray
+#         n_timepoints vector of circ-shifted firing rates if n_perms == 1 
+#         or n_perms x n_timepoints array if n_perms > 1.
+#     """
+#     fr_train_null = np.array([np.concatenate(event_times['time'].apply(lambda x: shift_fr_train(x, fr_train)))
+#                               for i in range(n_perms)]) # n_perms x len(fr_train)
+                              
+#     if n_perms == 1:
+#         fr_train_null = np.squeeze(fr_train_null) # len(fr_train)
+    
+#     return fr_train_null
 
 
 # def shift_fr_train(event_window, fr_train):
