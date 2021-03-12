@@ -804,11 +804,11 @@ def load_events(subj_sess,
 
     if op.exists(filename) and not overwrite:
         if verbose:
-            print('Loading pickled events')
+            print('Loading saved Events file')
         events = dio.open_pickle(filename)
     else:
         if verbose:
-            print('Instantiating events')
+            print('Creating Events')
         events = Events(subj_sess,
                         proj_dir=proj_dir,
                         filename=filename,
