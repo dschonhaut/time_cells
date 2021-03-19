@@ -10,11 +10,11 @@ daniel.schonhaut@gmail.com
     
 Description
 ----------- 
-Functions for analyzing firing rate data within event windows.
+Functions for analyzing firing rate data within time bins.
 
 Last Edited
 ----------- 
-3/11/21
+3/19/21
 """
 import sys
 import os.path as op
@@ -28,6 +28,7 @@ import numpy as np
 import scipy.stats as stats
 import pandas as pd
 import statsmodels.api as sm
+from statsmodels.formula.api import ols
 from sklearn.preprocessing import minmax_scale
 from sklearn.model_selection import KFold
 from sklearn.svm import LinearSVC
@@ -91,6 +92,7 @@ class EventSpikes(object):
     def _set_column_map(self):
         """Organize event_spikes columns into behavioral and neural ID lists."""
         cols = od({'icpt': ['icpt'],
+                   'trial': [col for col in self.event_spikes.columns if col.startswith('trial-')],
                    'time': ['time-{}'.format(_i) for _i in range(1, 11)],
                    'place': [col for col in self.event_spikes.columns if col.startswith('place-')],
                    'hd': [col for col in self.event_spikes.columns if col.startswith('hd-')],
@@ -148,13 +150,21 @@ class EventSpikes(object):
         time_step_loc, time_step_vals = event_spikes.columns.tolist().index('time_step'), event_spikes['time_step'].tolist()
         maze_region_loc, maze_region_vals = event_spikes.columns.tolist().index('maze_region'), event_spikes['maze_region'].tolist()
         head_direc_loc, head_direc_vals = event_spikes.columns.tolist().index('head_direc'), event_spikes['head_direc'].tolist()
+        trial_loc, trial_vals = event_spikes.columns.tolist().index('trial'), event_spikes['trial'].tolist()
         event_spikes = pd.get_dummies(event_spikes, prefix_sep='-',
-                                      prefix={'time_step': 'time', 'maze_region': 'place', 'head_direc': 'hd'}, 
-                                      columns=['time_step', 'maze_region', 'head_direc'])
+                                      prefix={'time_step': 'time', 
+                                              'maze_region': 'place', 
+                                              'head_direc': 'hd', 
+                                              'trial': 'trial'},
+                                      columns=['time_step', 
+                                               'maze_region', 
+                                               'head_direc', 
+                                               'trial'])
         event_spikes.insert(time_step_loc, 'time_step', time_step_vals)
         event_spikes.insert(maze_region_loc, 'maze_region', maze_region_vals)
         event_spikes.insert(head_direc_loc, 'head_direc', head_direc_vals)
-        
+        event_spikes.insert(trial_loc, 'trial', trial_vals)
+
         # Only count the base as being in view when player is outside the base.
         event_spikes.loc[(event_spikes['place-Base']==1) & (event_spikes['base_in_view']==1), 'base_in_view'] = 0
         
@@ -212,57 +222,42 @@ def load_event_spikes(subj_sess,
     return event_spikes
 
 
-def lr_test(res_reduced, res_full):
-    """Run a likelihood ratio test comparing nested models.
+def model_unit_fr(subj_sess,
+                  neuron,
+                  game_states=['Delay1', 'Delay2', 'Encoding', 'Retrieval'],
+                  model='ols',
+                  n_perm=1000,
+                  proj_dir='/home1/dscho/projects/time_cells',
+                  filename=None,
+                  overwrite=False,
+                  save_output=True,
+                  verbose=False,
+                  **kwargs):
+    """Predict a neuron's firing rate from behavioral variables.
     
+    kwargs are passed to the model fitting function.
+
     Parameters
     ----------
-    res_reduced : statsmodels results class
-        Results for the reduced model, which
-        must be a subset of the full model.
-    res_full : statsmodels results class
-        Results for the full model.
-        
-    Returns
-    -------
-    lr : float
-        The likelihood ratio.
-    df : int
-        Degrees of freedom, defined as the difference between
-        the number of parameters in the full vs. reduced models.
-    pval : float
-        P-value, or the area to the right of the likehood ratio
-        on the chi-squared distribution with df degrees of freedom.
-    """
-    lr = -2 * (res_reduced.llf - res_full.llf)
-    df = len(res_full.params) - len(res_reduced.params)
-    pval = stats.chi2.sf(lr, df)
-    
-    return lr, df, pval
-
-
-def glm_fit_unit(subj_sess,
-                 neuron,
-                 game_states=['Delay1', 'Delay2', 'Encoding', 'Retrieval'],
-                 n_perm=1000,
-                 proj_dir='/home1/dscho/projects/time_cells',
-                 filename=None,
-                 overwrite=False,
-                 save_output=True,
-                 verbose=False,
-                 **kwargs):
-    """Fit GLMs to predict firing rates for multiple game_states.
-    
-    **kwargs are passed to glm_fit().
+    subj_sess : str
+        e.g. 'U518-ses0'
+    neuron : str
+        e.g. '17-1' is channel 17, unit 1.
+    game_states : list
+        One or more game_states that you want to fit models for.
+    model : str
+        Determines the type of regression model used. 'ols' or 'glm'
+    n_perm : positive int
+        The number of permutations to draw for the null distribution.
 
     Returns
     -------
-    glm_res : DataFrame
+    model_pairs : DataFrame
     """
     # Load the output file if it exists.
     if filename is None:
-        filename = op.join(proj_dir, 'analysis', 'behav_glms', 
-                           '{}-{}-glm_results.pkl'.format(subj_sess, neuron))
+        filename = op.join(proj_dir, 'analysis', 'unit_to_behav', 
+                           '{}-{}-{}-time_bin-model_pairs.pkl'.format(subj_sess, neuron, model))
     
     if op.exists(filename) and not overwrite:
         if verbose:
@@ -272,35 +267,139 @@ def glm_fit_unit(subj_sess,
     # Load the event_spikes dataframe.
     event_spikes = load_event_spikes(subj_sess)
 
-    # Get the GLM fits.
-    warnings.filterwarnings('ignore')
+    # Reduce dataframe size to just the columns we need.
+    if model == 'ols':
+        keep_cols = ['trial', 'gameState', 'time_step', 'maze_region', 'head_direc', 'is_moving', 
+                     'base_in_view', 'gold_in_view', 'dig_performed', neuron]
+        event_spikes.event_spikes = event_spikes.event_spikes[keep_cols]
+
+    # Define the model fitting function.
+    if model == 'ols':
+        model_func = ols_fit
+    elif model == 'glm':
+        model_func = glm_fit
+        warnings.filterwarnings('ignore')
+
+    # Fit models for the chosen game states.
     model_fits = od([])
     for game_state in game_states:
         if verbose:
-            print('\tfitting {} GLMs...'.format(game_state))
-        model_fits[game_state] = glm_fit(neuron, 
-                                         event_spikes, 
-                                         game_state, 
-                                         n_perm=n_perm)
+            print('\tfitting {} {}...'.format(game_state, model.upper()))
+        model_fits[game_state] = model_func(neuron, 
+                                            event_spikes, 
+                                            game_state, 
+                                            n_perm=n_perm,
+                                            **kwargs)
     warnings.resetwarnings()
 
-    # Compare GLM results for preselected model contrasts, and store
+    # Compare results for preselected model contrasts, and store
     # the results in a dataframe.
-    glm_res = _get_glm_res(subj_sess,
-                           neuron,
-                           model_fits)
+    model_pairs = get_model_pairs(model_fits)
 
-    # Save the glm_res dataframe.
+    # Save the model_pairs dataframe.
     if save_output:
-        dio.save_pickle(glm_res, filename, verbose)
+        dio.save_pickle(model_pairs, filename, verbose)
 
-    return glm_res
+    return model_pairs
+
+
+def ols_fit(neuron,
+            event_spikes,
+            game_state,
+            n_perm=0,
+            regress_trial=True,
+            perm_method='circshift'):
+    """Fit firing rates using OLS regression.
+    
+    Parameters
+    ----------
+    neuron : str
+        e.g. '5-2' would be channel 5, unit 2
+    event_spikes : pd.DataFrame
+        EventSpikes instance that contains the event_spikes dataframe,
+        an expanded version of the behav_events dataframe with columns 
+        added for each neuron.
+    game_state : str
+        Delay1, Encoding, Delay2, or Retrieval
+    n_perm : positive int
+        The number of permutations to draw for the null distribution.
+    regress_trial : bool
+        If True, GLM includes a dummy-coded predictor for each trial.
+        If False, no trial predictors are added.
+    perm_method : str
+        Determines how the firing rate vector will be randomized to 
+        obtain a null distribution. 'circshift' or 'shuffle'
+    
+    Returns
+    -------
+    model_fits : dict[RegressionResultsWrapper]
+        Contains model fits from real and shuffled spike data.
+    """
+    # Select rows for the chosen game state.
+    df = event_spikes.event_spikes.query("(gameState=='{}')".format(game_state)).copy()
+
+    # For delays, sum spikes across time bins within each time step, within each trial.
+    if game_state in ['Delay1', 'Delay2']:
+        df = df.groupby(['trial', 'time_step']).agg({neuron: np.sum}).reset_index()
+    
+    # Make sure there are no nans in the dummy columns.
+    if game_state in ['Encoding', 'Retrieval']:
+        dummys = ['is_moving', 'base_in_view', 'gold_in_view', 'dig_performed']
+        df[dummys] = df[dummys].fillna(0)
+
+    # Define the model formulas.
+    trial_term = ' + C(trial)' if regress_trial else ''
+    formulas = od([])
+    if game_state in ['Delay1', 'Delay2']:
+        formulas['time'] = "Q('{}') ~ 1 + C(time_step){}".format(neuron, trial_term)
+        formulas['icpt'] = "Q('{}') ~ 1               {}".format(neuron, trial_term)
+
+    elif game_state in ['Encoding', 'Retrieval']:
+        formulas['time_place'] = "Q('{}') ~ 1 + C(time_step) + C(maze_region){}".format(neuron, trial_term)
+        formulas['place']      = "Q('{}') ~ 1                + C(maze_region){}".format(neuron, trial_term)
+        formulas['time']       = "Q('{}') ~ 1 + C(time_step)                 {}".format(neuron, trial_term)
+
+        dig_term = ' + dig_performed' if (game_state == 'Retrieval') else ''
+        formulas['full']          = "Q('{}') ~ 1 + C(time_step) + C(maze_region) + C(head_direc) + is_moving + base_in_view + gold_in_view{}{}".format(neuron, dig_term, trial_term)
+        formulas['full_subtime']  = "Q('{}') ~ 1                + C(maze_region) + C(head_direc) + is_moving + base_in_view + gold_in_view{}{}".format(neuron, dig_term, trial_term)
+        formulas['full_subplace'] = "Q('{}') ~ 1 + C(time_step)                  + C(head_direc) + is_moving + base_in_view + gold_in_view{}{}".format(neuron, dig_term, trial_term)
+        formulas['full_subhd']    = "Q('{}') ~ 1 + C(time_step) + C(maze_region)                 + is_moving + base_in_view + gold_in_view{}{}".format(neuron, dig_term, trial_term)
+        formulas['full_subbiv']   = "Q('{}') ~ 1 + C(time_step) + C(maze_region) + C(head_direc) + is_moving                + gold_in_view{}{}".format(neuron, dig_term, trial_term)
+        formulas['full_subgiv']   = "Q('{}') ~ 1 + C(time_step) + C(maze_region) + C(head_direc) + is_moving + base_in_view               {}{}".format(neuron, dig_term, trial_term)
+
+    # Fit the models.
+    res = od([])
+    for mod_name in formulas.keys():
+        res[mod_name] = ols(formulas[mod_name], data=df).fit()
+
+    # Fit the same models to shuffled spike counts.
+    res_null = od({k: [] for k in formulas.keys()})
+    for iPerm in range(n_perm):
+        # Permute the firing rate vector.
+        if perm_method == 'circshift':
+            df[neuron] = np.concatenate(df.groupby('trial')[neuron].apply(lambda x: list(_shift_spikes(x))).tolist())
+        elif perm_method == 'shuffle':
+            df[neuron] = np.concatenate(df.groupby('trial')[neuron].apply(lambda x: list(_shuffle_spikes(x))).tolist())
+        else:
+            raise RuntimeError("Permutation method '{}' not recognized".format(perm_method))
+
+        # Fit the model.
+        for mod_name in formulas.keys():
+            res_null[mod_name].append(ols(formulas[mod_name], data=df).fit())
+        
+    model_fits = od({'subj_sess': event_spikes.subj_sess, 
+                     'neuron': neuron,
+                     'obs': res,
+                     'null': res_null})
+    return model_fits
 
 
 def glm_fit(neuron,
             event_spikes,
             game_state,
             n_perm=0,
+            regress_trial=True,
+            perm_method='circshift',
             optimizer='lbfgs'):
     """Fit firing rates using Poisson-link GLM.
     
@@ -317,6 +416,12 @@ def glm_fit(neuron,
     n_perm : positive int
         The number of permutations to include in a null mutation
         spike counts (circ-shifted at random within each trial).
+    regress_trial : bool
+        If True, GLM includes a dummy-coded predictor for each trial.
+        If False, no trial predictors are added.
+    perm_method : str
+        Determines how the firing rate vector will be scrambled to 
+        obtain the null distribution. 'circshift' or 'shuffle'
     optimizer : str
         The optimization algorithm to use for fitting model weights.
         Default uses limited-memory BFGS, chosen because it is fast and
@@ -330,28 +435,45 @@ def glm_fit(neuron,
     """
     # Get the data relevant time bins.
     df = event_spikes.event_spikes.query("(gameState=='{}')".format(game_state))
-    cols = event_spikes.column_map
-    
+    cm = event_spikes.column_map.copy()
+
+    # For categorical variables with >2 levels, drop the first level.
+    cm['time'] = cm['time'][1:]
+    cm['place'] = cm['place'][1:]
+    cm['hd'] = cm['hd'][1:]
+    cm['trial'] = cm['trial'][1:]
+
+    # For delays, sum spikes across time bins within each time step, within each trial.
+    if game_state in ['Delay1', 'Delay2']:
+        df = pd.concat((df.groupby(['trial', 'time_step'])
+                          .agg({neuron: np.sum}),
+                        df.groupby(['trial', 'time_step'])
+                          .agg({icpt: np.mean for icpt in event_spikes.column_map['icpt']}),
+                        df.groupby(['trial', 'time_step'])
+                          .agg({time: np.mean for time in event_spikes.column_map['time']}),
+                        df.groupby(['trial', 'time_step'])
+                          .agg({trial: np.mean for trial in event_spikes.column_map['trial']})),
+                       axis=1)
+
     # Independent variables are the dummy coded time steps and the intercept constant.
+    trial_cols = cm['trial'] if regress_trial else []
     predictors = od([])
     if game_state in ['Delay1', 'Delay2']:
-        predictors['time'] = cols['icpt'] + cols['time'] 
-        predictors['icpt'] = cols['icpt'] 
+        predictors['time'] = cm['icpt'] + cm['time'] + trial_cols
+        predictors['icpt'] = cm['icpt']              + trial_cols
 
     elif game_state in ['Encoding', 'Retrieval']:
-        predictors['time_place'] = cols['icpt'] + cols['time'] + cols['place'] 
-        predictors['place'] = cols['icpt'] + cols['place'] 
-        predictors['time'] = cols['icpt'] + cols['time']
+        predictors['time_place'] = cm['icpt'] + cm['time'] + cm['place'] + trial_cols
+        predictors['place'] = cm['icpt'] + cm['place'] + trial_cols
+        predictors['time'] = cm['icpt'] + cm['time'] + trial_cols
         
-        dig_col = []
-        if game_state == 'Retrieval':
-            dig_col += cols['dig_performed']
-        predictors['full']          = cols['icpt'] + cols['time'] + cols['place'] + cols['hd'] + cols['is_moving'] + cols['base_in_view'] + cols['gold_in_view'] + dig_col
-        predictors['full_subtime']  = cols['icpt']                + cols['place'] + cols['hd'] + cols['is_moving'] + cols['base_in_view'] + cols['gold_in_view'] + dig_col
-        predictors['full_subplace'] = cols['icpt'] + cols['time']                 + cols['hd'] + cols['is_moving'] + cols['base_in_view'] + cols['gold_in_view'] + dig_col
-        predictors['full_subhd']    = cols['icpt'] + cols['time'] + cols['place']              + cols['is_moving'] + cols['base_in_view'] + cols['gold_in_view'] + dig_col
-        predictors['full_subbiv']   = cols['icpt'] + cols['time'] + cols['place'] + cols['hd'] + cols['is_moving']                        + cols['gold_in_view'] + dig_col
-        predictors['full_subgiv']   = cols['icpt'] + cols['time'] + cols['place'] + cols['hd'] + cols['is_moving'] + cols['base_in_view']                        + dig_col
+        dig_col = cm['dig_performed'] if (game_state == 'Retrieval') else []
+        predictors['full']          = cm['icpt'] + cm['time'] + cm['place'] + cm['hd'] + cm['is_moving'] + cm['base_in_view'] + cm['gold_in_view'] + dig_col + trial_cols
+        predictors['full_subtime']  = cm['icpt']              + cm['place'] + cm['hd'] + cm['is_moving'] + cm['base_in_view'] + cm['gold_in_view'] + dig_col + trial_cols
+        predictors['full_subplace'] = cm['icpt'] + cm['time']               + cm['hd'] + cm['is_moving'] + cm['base_in_view'] + cm['gold_in_view'] + dig_col + trial_cols
+        predictors['full_subhd']    = cm['icpt'] + cm['time'] + cm['place']            + cm['is_moving'] + cm['base_in_view'] + cm['gold_in_view'] + dig_col + trial_cols
+        predictors['full_subbiv']   = cm['icpt'] + cm['time'] + cm['place'] + cm['hd'] + cm['is_moving']                      + cm['gold_in_view'] + dig_col + trial_cols
+        predictors['full_subgiv']   = cm['icpt'] + cm['time'] + cm['place'] + cm['hd'] + cm['is_moving'] + cm['base_in_view']                      + dig_col + trial_cols
 
     # Fit Poisson regressions.
     res = od([])
@@ -363,32 +485,27 @@ def glm_fit(neuron,
     # Fit the same models to shuffled spike counts.
     res_null = od({k: [] for k in predictors.keys()})
     for iPerm in range(n_perm):
-        y = np.concatenate(df.groupby('trial')[neuron].apply(lambda x: list(_shift_spikes(x))).tolist())
+        # Permute the firing rate vector.
+        if perm_method == 'circshift':
+            y = np.concatenate(df.groupby('trial')[neuron].apply(lambda x: list(_shift_spikes(x))).tolist())
+        elif perm_method == 'shuffle':
+            y = np.concatenate(df.groupby('trial')[neuron].apply(lambda x: list(_shuffle_spikes(x))).tolist())
+        else:
+            raise RuntimeError("Permutation method '{}' not recognized".format(perm_method))
+
+        # Fit the model.
         for mod_name in predictors.keys():
             X = df[predictors[mod_name]].fillna(0)
             res_null[mod_name].append(sm.GLM(y, X, family=sm.families.Poisson()).fit(method=optimizer))
         
-    model_fits = od({'obs': res, 'null': res_null})
+    model_fits = od({'subj_sess': event_spikes.subj_sess, 
+                     'neuron': neuron,
+                     'obs': res,
+                     'null': res_null})
     return model_fits
 
 
-def spikes_per_timebin(events_behav,
-                       spike_times):
-    """Count how many spikes are in each time bin.
-    
-    Returns a pandas Series.
-    """
-    def count_spikes(row, spike_times):
-        start = row['start_time']
-        stop = row['stop_time']
-        return np.count_nonzero((spike_times >= start) & (spike_times < stop))
-
-    return events_behav.apply(lambda x: count_spikes(x, spike_times), axis=1)
-
-
-def _get_glm_res(subj_sess,
-                 neuron,
-                 model_fits):
+def get_model_pairs(model_fits):
     """Compare GLM fits between predefined model pairs.
     
     Parameters
@@ -398,11 +515,11 @@ def _get_glm_res(subj_sess,
     neuron : str
         e.g. '17-1' is channel 17, unit 1.
     model_fits : dict
-        This is the output of glm_fit_unit().
+        This is the output of ols_fit() and glm_fit().
 
     Returns
     -------
-    glm_res : DataFrame
+    model_pairs : DataFrame
     """
     # Find the names of all independent variables tested across models.
     param_cols = []
@@ -414,10 +531,13 @@ def _get_glm_res(subj_sess,
     # Iterate over each constrast in the model comparison dataframe
     # and add on the GLM fit variables.
     model_comp = _get_model_comp()
-    model_output_cols = ['llf_diff', 'z_llf_diff', 'lr', 'df', 'chi_pval', 'emp_pval', 'null_hist'] + param_cols
+    model_output_cols = ['llf_full', 'lr', 'z_lr', 'df', 'chi_pval', 'emp_pval', 'null_hist'] + param_cols
     model_output = []
     for iRow, row in model_comp.iterrows():
         game_state = row['gameState']
+        if game_state not in model_fits.keys():
+            continue
+        
         full_mod = row['full']
         reduced_mod = row['reduced']
 
@@ -426,37 +546,39 @@ def _get_glm_res(subj_sess,
         for k, v in model_fits[game_state]['obs'][full_mod].params.to_dict().items():
             params[k] = v
 
-        # Get the difference between reduced and full model AICs.
-        # Better model fits are indicated by positive AIC_diff values.
-        llf_diff = (model_fits[game_state]['obs'][reduced_mod].llf - 
-                    model_fits[game_state]['obs'][full_mod].llf)
+        # Peform a likelihood ratio test on the full vs. reduced models.
+        llf_full = model_fits[game_state]['obs'][full_mod].llf
         lr, df, chi_pval = lr_test(model_fits[game_state]['obs'][reduced_mod], 
                                    model_fits[game_state]['obs'][full_mod])
+        lr = np.max((lr, 0))
 
-        # Get AIC diffs from the null distribution, 
+        # Get likelihood ratios from the null distribution, 
         # and use these to obtain an empirical p-value.
         n_perm = len(model_fits[game_state]['null'][reduced_mod])
-        null_llf_diffs = np.array([model_fits[game_state]['null'][reduced_mod][iPerm].llf -
-                                   model_fits[game_state]['null'][full_mod][iPerm].llf
-                                   for iPerm in range(n_perm)])
-        null_mean = np.mean(null_llf_diffs)
-        null_std = np.std(null_llf_diffs)
-        null_hist = np.histogram(null_llf_diffs, bins=31)
-        z_llf_diff = (llf_diff - null_mean) / null_std
-        pval_ind = np.sum(null_llf_diffs >= llf_diff)
+        null_lrs = np.array([get_lr(model_fits[game_state]['null'][reduced_mod][iPerm],
+                                    model_fits[game_state]['null'][full_mod][iPerm])
+                             for iPerm in range(n_perm)])
+        null_lrs[np.isnan(null_lrs)] = 0
+        null_lrs[null_lrs<0] = 0
+        null_mean = np.mean(null_lrs)
+        null_std = np.std(null_lrs)
+        null_hist = np.histogram(null_lrs, bins=31)
+        z_lr = (lr - null_mean) / null_std
+        pval_ind = np.sum(null_lrs >= lr)
         emp_pval = (pval_ind + 1) / (n_perm + 1)
 
-        # Add the results to the output dataframe.
-        model_output.append([llf_diff, z_llf_diff, lr, df, chi_pval, emp_pval, list(null_hist)] + list(params.values()))
+        # Add results to the output dataframe.
+        model_output.append([llf_full, lr, z_lr, df, chi_pval, emp_pval, list(null_hist)] + list(params.values()))
     
     model_output = pd.DataFrame(model_output, columns=model_output_cols)
-    glm_res = pd.concat((model_comp, model_output), axis=1)
-    
+    model_pairs = pd.concat((model_comp, model_output), axis=1)
+    model_pairs = model_pairs[np.isfinite(model_pairs['lr'])]
+
     # Add subj_sess and neuron identity columns.
-    glm_res.insert(0, 'subj_sess', subj_sess)
-    glm_res.insert(1, 'neuron', neuron)
+    model_pairs.insert(0, 'subj_sess', list(model_fits.values())[0]['subj_sess'])
+    model_pairs.insert(1, 'neuron', list(model_fits.values())[0]['neuron'])
     
-    return glm_res
+    return model_pairs
 
 
 def _get_model_comp():
@@ -484,10 +606,80 @@ def _get_model_comp():
     return model_comp
 
 
+def lr_test(res_reduced, res_full):
+    """Run a likelihood ratio test comparing nested models.
+    
+    Parameters
+    ----------
+    res_reduced : statsmodels results class
+        Results for the reduced model, which
+        must be a subset of the full model.
+    res_full : statsmodels results class
+        Results for the full model.
+        
+    Returns
+    -------
+    lr : float
+        The likelihood ratio.
+    df : int
+        Degrees of freedom, defined as the difference between
+        the number of parameters in the full vs. reduced models.
+    pval : float
+        P-value, or the area to the right of the likehood ratio
+        on the chi-squared distribution with df degrees of freedom.
+    """
+    lr = get_lr(res_reduced, res_full)
+    df = len(res_full.params) - len(res_reduced.params)
+    pval = stats.chi2.sf(lr, df)
+    
+    return lr, df, pval
+
+
+def get_lr(res_reduced, res_full):
+    """Return the likelihood ratio.
+    
+    Parameters
+    ----------
+    res_reduced : statsmodels results class
+        Results for the reduced model, which
+        must be a subset of the full model.
+    res_full : statsmodels results class
+        Results for the full model.
+        
+    Returns
+    -------
+    lr : float
+        The likelihood ratio.
+    """
+    lr = -2 * (res_reduced.llf - res_full.llf)
+    return lr
+
+
+def spikes_per_timebin(events_behav,
+                       spike_times):
+    """Count how many spikes are in each time bin.
+    
+    Returns a pandas Series.
+    """
+    def count_spikes(row, spike_times):
+        start = row['start_time']
+        stop = row['stop_time']
+        return np.count_nonzero((spike_times >= start) & (spike_times < stop))
+
+    return events_behav.apply(lambda x: count_spikes(x, spike_times), axis=1)
+
+
 def _shift_spikes(spike_vec):
     """Circularly shift spike vector."""
     roll_by = np.random.randint(0, len(spike_vec))
     return np.roll(spike_vec, roll_by)
+
+
+def _shuffle_spikes(spike_vec):
+    """Shuffle spike vector."""
+    idx = np.arange(len(spike_vec))
+    np.random.shuffle(idx)
+    return np.array(list(spike_vec))[idx]
 
 
 def calc_mean_fr_by_time(fr_by_time_bin_f,
