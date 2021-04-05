@@ -419,15 +419,16 @@ def roi_mapping():
             'EC': 'EC',
             'FOp': 'Frontal',
             'FOP': 'Frontal',
-            'HGa': 'Temporal',
+            'FSG': 'Cortical',
+            'HGa': 'Cortical',
             'MFG': 'Frontal',
             'MH': 'Hippocampus',
-            'O': 'Parieto-occipital',
+            'O': 'Cortical',
             'OF': 'Frontal',
-            'PHG': 'Temporal',
+            'PHG': 'Cortical',
             'PI-SMG': 'Frontal',
-            'TO': 'Temporal',
-            'TPO': 'Parieto-occipital'}
+            'TO': 'Cortical',
+            'TPO': 'Cortical'}
     return rois
 
 

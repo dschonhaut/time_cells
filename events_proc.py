@@ -14,7 +14,7 @@ Functions to consolidate Goldmine events into time bins for analysis.
 
 Last Edited
 ----------- 
-2/22/20
+3/26/20
 """
 import sys
 import os.path as op
@@ -814,6 +814,13 @@ def load_events(subj_sess,
                         filename=filename,
                         verbose=verbose,
                         **kwargs)
+    
+    # Do any extra formatting.
+    game_states = ['Delay1', 'Encoding', 'ReturnToBase1', 
+                   'Delay2', 'Retrieval', 'ReturnToBase2']
+    game_state_cat = pd.CategoricalDtype(game_states, ordered=True)
+    events.events_behav['gameState'] = events.events_behav['gameState'].astype(game_state_cat)
+
     return events
 
 
