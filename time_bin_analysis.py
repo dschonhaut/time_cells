@@ -22,6 +22,7 @@ from glob import glob
 from collections import OrderedDict as od
 import itertools
 import warnings
+import random
 import mkl
 mkl.set_num_threads(1)
 import numpy as np
@@ -955,3 +956,135 @@ def info_rate(fr_given_x,
         warnings.simplefilter('ignore')
         bits_per_spike = np.nansum(prob_x * (fr_given_x/mean_fr) * np.log2(fr_given_x/mean_fr))
     return bits_per_spike
+
+
+def get_mean_frs(spike_mat):
+    """Return mean firing rate across trials, for each time bin.
+    
+    Parameters
+    ----------
+    spike_mat : DataFrame or array
+        A trial x time_bin matrix of spike counts.
+        
+    Returns
+    -------
+    mean_frs : vector
+        Each value is the mean number of spikes for a given time bin.
+        For a 500ms time bin, you can get firing rate in Hz by
+        multiplying the output of this function by 2.
+    """
+    mean_frs = np.mean(spike_mat, axis=0)
+    return mean_frs
+
+
+def get_sem_frs(spike_mat):
+    """Return mean firing rate across trials, for each time bin.
+    
+    Parameters
+    ----------
+    spike_mat : DataFrame or array
+        A trial x time_bin matrix of spike counts.
+        
+    Returns
+    -------
+    sem_frs : vector
+        Each value is the standard error of the mean number of 
+        spikes for a given time bin. For a 500ms time bin, you 
+        can get SEM firing rate in Hz by multiplying the output 
+        of this function by 2.
+    """
+    sem_frs = stats.sem(spike_mat, axis=0)
+    return sem_frs
+
+
+def get_sparsity(spike_mat):
+    """Return sparsity for a trial x time_bin spike matrix.
+    
+    Ranges from 0 to 1, with smaller values reflecting finer tuning.
+    
+    See Jung, Wiener & McNaughton, J Neurosci 1994
+    """
+    mean_frs = get_mean_frs(spike_mat)
+    numer = np.square(np.sum(mean_frs)/mean_frs.size)
+    denom = np.sum(np.square(mean_frs)/mean_frs.size)
+    return numer / denom
+
+
+def bootstrap_time_fields(spike_mat,
+                          z_thresh=2,
+                          n_perm=1000):
+    """Identify time fields using a bootstrap estimation method.
+    
+    n_trial values are drawn from spike_mat with replacement, and
+    the mean across them is calculated. This is repeated 500 times
+    to obtain a sample distribution. Actual mean firing rates across
+    trials are then Z-scored against this distribution, and time fields
+    are defined as any time bin with a Z-score > z_thresh.
+    
+    Parameters
+    ----------
+    spike_mat : DataFrame
+        A trial x time_bin matrix of spike counts.
+    z_thresh : real number
+        Time fields are defined by Z-scored mean firing rates > z_thresh.
+        
+    Returns
+    -------
+    cutoff_fr : float
+        The firing rate above which values are defined as time fields.
+    z_mean_frs : Series
+        Z-scored firing rates over time.
+    time_field : array[int]
+        All time bins with Z-scores > z_thresh.
+    """
+    n_trial = spike_mat.shape[0]
+    mean_frs = np.mean(spike_mat, axis=0)
+    spike_vals = spike_mat.values.ravel()
+    sample_mean_frs = np.array([np.mean(random.choices(spike_vals, k=n_trial)) for _ in range(n_perm)])
+    sample_mean = np.mean(sample_mean_frs)
+    sample_std = np.std(sample_mean_frs)
+    cutoff_fr = (z_thresh * sample_std) + sample_mean
+    z_mean_frs = (mean_frs - sample_mean) / sample_std
+    time_field = np.where(z_mean_frs > z_thresh)[0]
+    return cutoff_fr, z_mean_frs, time_field
+
+
+def bootstrap_time_fields2(spike_mat,
+                           n_perm=10000):
+    """Identify time fields using a bootstrap estimation method.
+    
+    n_trial values are drawn from spike_mat with replacement, and
+    the mean across them is calculated. This is repeated 500 times
+    to obtain a sample distribution. Actual mean firing rates across
+    trials are then Z-scored against this distribution, and time fields
+    are defined as any time bin with empirical p-values < 0.05, 
+    Bonferroni-Holm corrected.
+    
+    Parameters
+    ----------
+    spike_mat : DataFrame
+        A trial x time_bin matrix of spike counts.
+        
+    Returns
+    -------
+    z_mean_frs : Series
+        Z-scored firing rates over time.
+    time_field : array[int]
+        All time bins with empirical p-values < 0.05,
+        Bonferroni-Holm corrected.
+    time_field_size : int
+        The number of time bins with significantly elevated firing.
+    """
+    n_trial = spike_mat.shape[0]
+    mean_frs = np.mean(spike_mat, axis=0)
+    spike_vals = spike_mat.values.ravel()
+    sample_mean_frs = np.array([np.mean(random.choices(spike_vals, k=n_trial)) for _ in range(n_perm)])
+    sample_mean = np.mean(sample_mean_frs)
+    sample_std = np.std(sample_mean_frs)
+    z_mean_frs = (mean_frs - sample_mean) / sample_std
+    alpha = 0.05
+    pvals = (1 + np.array([np.sum(sample_mean_frs>=fr) for fr in mean_frs])) / (1 + n_perm)
+    sig = sm.stats.multipletests(pvals, alpha, method='holm')[0]
+    time_field = np.where(sig)[0]
+    time_field_size = len(time_field)
+    return z_mean_frs, time_field, time_field_size
