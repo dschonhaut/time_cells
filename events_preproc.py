@@ -74,10 +74,11 @@ def read_events_json(subj_sess,
 def load_syncs(subj_sess,
                data_key='data',
                proj_dir='/home1/dscho/projects/time_cells',
+               basename='sync_channel_micro.mat',
                verbose=True):
     """Load the EEG channel that stores sync pulses from the testing laptop."""
     subj, sess = subj_sess.split('_')
-    sync_f = os.path.join(proj_dir, 'data', subj, sess, 'sync', 'sync_channel_micro.mat')
+    sync_f = os.path.join(proj_dir, 'data', subj, sess, 'sync', basename)
     try:
         sync_chan = np.squeeze(sio.loadmat(sync_f)[data_key])
     except NotImplementedError:

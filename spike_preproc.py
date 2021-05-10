@@ -410,25 +410,57 @@ def roi_lookup(subj_sess,
     return ''
 
 
-def roi_mapping():
-    """Return a dictionary of region acronyms to aggregate ROIs."""
-    rois = {'A': 'Amygdala',
-            'AC': 'Frontal',
-            'AH': 'Hippocampus',
-            'AI': 'Frontal',
-            'EC': 'EC',
-            'FOp': 'Frontal',
-            'FOP': 'Frontal',
-            'FSG': 'Cortical',
-            'HGa': 'Cortical',
-            'MFG': 'Frontal',
-            'MH': 'Hippocampus',
-            'O': 'Cortical',
-            'OF': 'Frontal',
-            'PHG': 'Cortical',
-            'PI-SMG': 'Frontal',
-            'TO': 'Cortical',
-            'TPO': 'Cortical'}
+def roi_mapping(n=3):
+    """Return a dictionary of region acronyms to aggregate ROIs.
+
+    Parameters
+    ----------
+    n : int
+        How many regions to map to. 
+        For n=3, regions are hippocampus, MTL (amygdala + EC + 
+        parahippocampus), and cortex (other).
+        For n=5, regions are hippocampus, amygdala, entorhinal cortex, 
+        frontal lobe, and cortex (other).
+    """
+    if n == 3:
+        rois = {'A': 'MTL',
+                'AC': 'Cortex',
+                'AH': 'Hippocampus',
+                'AI': 'Cortex',
+                'EC': 'MTL',
+                'FOp': 'Cortex',
+                'FOP': 'Cortex',
+                'FSG': 'Cortex',
+                'HGa': 'Cortex',
+                'MFG': 'Cortex',
+                'MH': 'Hippocampus',
+                'O': 'Cortex',
+                'OF': 'Cortex',
+                'PHG': 'MTL',
+                'PI-SMG': 'Cortex',
+                'TO': 'Cortex',
+                'TPO': 'Cortex'}
+    elif n == 5:
+        rois = {'A': 'Amygdala',
+                'AC': 'Frontal',
+                'AH': 'Hippocampus',
+                'AI': 'Frontal',
+                'EC': 'EC',
+                'FOp': 'Frontal',
+                'FOP': 'Frontal',
+                'FSG': 'Cortical',
+                'HGa': 'Cortical',
+                'MFG': 'Frontal',
+                'MH': 'Hippocampus',
+                'O': 'Cortical',
+                'OF': 'Frontal',
+                'PHG': 'Cortical',
+                'PI-SMG': 'Frontal',
+                'TO': 'Cortical',
+                'TPO': 'Cortical'}
+    else:
+        raise ValueError('n={} map regions has not been implemented'.format(n))
+
     return rois
 
 
