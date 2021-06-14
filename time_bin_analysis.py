@@ -223,6 +223,50 @@ def load_event_spikes(subj_sess,
     return event_spikes
 
 
+def load_pop_spikes(proj_dir='/home1/dscho/projects/time_cells'):
+    """Return the pop_spikes dataframe and a list of neuron columns.
+
+    Returns
+    -------
+    pop_spikes : DataFrame
+        pop_spikes concatenates spike counts of units across all subject
+        sessions within each trial, game state, and time bin. Each row
+        is a unique time bin, and each column a unique unit.
+    neurons : list
+        List of unique neuron names that make up pop_spikes columns.
+    """
+    # Find all subject sessions.
+    sessions = np.unique([op.basename(f).split('-')[0] 
+                          for f in glob(op.join(proj_dir, 'analysis', 'events', '*-Events.pkl'))])
+    
+    # Load the event_spikes dataframe for each session.
+    game_states = ['Delay1', 'Encoding', 'Delay2', 'Retrieval']
+    event_cols = ['trial', 'gameState', 'time_bin']
+    neurons = []
+    dfs = od([])
+    for subj_sess in sessions:
+        event_spikes = load_event_spikes(subj_sess, verbose=False)
+        neuron_labels = od({neuron: '{}-{}'.format(subj_sess, neuron) 
+                            for neuron in event_spikes.column_map['neurons']})
+        dfs[subj_sess] = (event_spikes.event_spikes.query("(gameState=={})".format(game_states))
+                                                   .rename(columns=neuron_labels)
+                                                   .loc[:, event_cols + list(neuron_labels.values())]
+                                                   .set_index(event_cols))
+        neurons += list(neuron_labels.values())
+    
+    # Concatentate spiking data for each unit, within each time bin, across sessions.
+    pop_spikes = pd.concat(dfs, axis=1)
+    pop_spikes.columns = pop_spikes.columns.get_level_values(1)
+    pop_spikes = pop_spikes.reset_index()
+
+    # Sort rows of the output dataframe by trial, game state, and time bin.
+    game_state_cat = pd.CategoricalDtype(game_states, ordered=True)
+    pop_spikes['gameState'] = pop_spikes['gameState'].astype(game_state_cat)
+    pop_spikes = pop_spikes.sort_values(['trial', 'gameState', 'time_bin']).reset_index(drop=True)
+    
+    return pop_spikes, neurons
+
+
 def model_unit_fr(subj_sess,
                   neuron,
                   game_states=['Delay1', 'Delay2', 'Encoding', 'Retrieval'],
