@@ -20,6 +20,7 @@ from collections import OrderedDict as od
 # Scientific
 import numpy as np
 import pandas as pd
+import scipy.stats as stats
 
 # Plots
 import matplotlib.pyplot as plt
@@ -76,13 +77,12 @@ def time_raster(subj_sess,
     # Load data to make the plot.
     if isinstance(game_states, str):
         game_states = [game_states]
-    game_state_durs = od({k: v for (k, v) in events_proc.get_game_state_durs().items() 
-                          if k in game_states})
+    game_state_durs = od({game_state: events_proc.get_game_state_durs()[game_state]
+                          for game_state in game_states})
     events = events_proc.load_events(subj_sess, proj_dir=proj_dir, verbose=False)
     spikes = spike_preproc.load_spikes(subj_sess, neuron, proj_dir=proj_dir)
     
     # Get user-defined params.
-    colws = kws.pop('colws', {1: 2.05, 2: 3.125, 3: 6.45})
     font = kws.pop('font', {'tick': 6, 'label': 7, 'annot': 7, 'fig': 9})
     labelpad = kws.pop('labelpad', 1)
     xtick_inc = kws.pop('xtick_inc', 10)
@@ -90,7 +90,7 @@ def time_raster(subj_sess,
     rasterwidth = kws.pop('rasterwidth', 0.1)
     ax_linewidth = kws.pop('ax_linewidth', 0.5)
     if ax is None:
-        fig, ax = plt.subplots(1, 1, figsize=(colws[1], colws[1] * (2/3)), dpi=1200)
+        fig, ax = plt.subplots(1, 1, figsize=(3.25, 3.25 * 0.5), dpi=1200)
         
     # For each trial, convert spike times to a downsampled spike train.
     for iTrial, trial in enumerate(events.keep_trials):
@@ -120,7 +120,7 @@ def time_raster(subj_sess,
     # Concentate spikes across trial phases.
     v_lines = np.cumsum([0] + list(game_state_durs.values()))
     if plot_vlines:
-        for x in v_lines[1:]:
+        for x in v_lines[1:-1]:
             ax.axvline(x=x, color='k', alpha=1, linewidth=ax_linewidth)
     for axis in ['left', 'bottom']:
         ax.spines[axis].set_linewidth(ax_linewidth)
@@ -139,17 +139,118 @@ def time_raster(subj_sess,
     if plot_labels:
         ax.set_xlabel('Time (s)', fontsize=font['label'], labelpad=labelpad)
         ax.set_ylabel('Trial', fontsize=font['label'], labelpad=labelpad)
-        if plot_game_states:
-            annot_x = v_lines[:-1] + (np.diff(v_lines) / 2)
-            for ii in range(len(annot_x)):
-                ax.text(annot_x[ii]/v_lines[-1], 1.1, game_states[ii].replace('Delay', 'Delay '),
-                        ha='center', va='center', fontsize=font['annot'], transform=ax.transAxes)
+    if plot_game_states:
+        annot_x = v_lines[:-1] + (np.diff(v_lines) / 2)
+        for ii in range(len(annot_x)):
+            ax.text(annot_x[ii]/v_lines[-1], 1.1, game_states[ii].replace('Delay', 'Delay '),
+                    ha='center', va='center', fontsize=font['annot'], transform=ax.transAxes)
     if plot_title:
         ax_title = '{}-{} ({})'.format(subj_sess, neuron, spikes['hemroi'])
         if len(game_states) == 1:
             ax_title += ', {}'.format(game_states[0])
         ax.set_title(ax_title, loc='left', pad=6, fontsize=font['fig'])
     
+    return ax
+
+
+def firing_rate_over_time(subj_sess,
+                          neuron,
+                          game_states=['Delay1', 'Encoding', 'Delay2', 'Retrieval'],
+                          plot_vlines=True,
+                          plot_labels=True,
+                          plot_game_states=True,
+                          plot_title=True,
+                          proj_dir='/home1/dscho/projects/time_cells',
+                          ax=None,
+                          **kws):
+    """Plot mean ± SEM firing rates over time for neuron, and return ax.
+    
+    Uses 500ms time bins.
+    """
+    # Get user-defined params.
+    font = kws.pop('font', {'tick': 6, 'label': 7, 'annot': 7, 'fig': 9})
+    linecolor = kws.pop('linecolor', '#e10600')
+    linewidth = kws.pop('linewidth', 0.6)
+    alpha = kws.pop('alpha', 0.15)
+    labelpad = kws.pop('labelpad', 1)
+    xtick_inc = kws.pop('xtick_inc', 10)
+    ax_linewidth = kws.pop('ax_linewidth', 0.5)
+    if ax is None:
+        fig, ax = plt.subplots(1, 1, figsize=(3.25, 3.25 * 0.5), dpi=1200)
+        
+    # Get some other params we'll need for plotting.
+    timebin_size = 500
+    if isinstance(game_states, str):
+        game_states = [game_states]
+    game_state_durs = od({game_state: events_proc.get_game_state_durs()[game_state]
+                          for game_state in game_states})
+    v_lines = (np.cumsum([0] + list(game_state_durs.values())) / timebin_size).astype(int)
+    xticks = np.arange(0, v_lines[-1] + 1, int((xtick_inc*1000)/timebin_size))
+    xticklabels = (xticks * (timebin_size/1000)).astype(int)
+    
+    # Get spikes for each trial, in each time bin.
+    event_spikes = time_bin_analysis.load_event_spikes(subj_sess, verbose=0)
+    # spike_mat = np.concatenate([event_spikes.get_spike_mat(neuron, game_state)
+    #                            for game_state in game_states], axis=1) # trial x time_bin
+    spike_mat = [event_spikes.get_spike_mat(neuron, game_state).values
+                 for game_state in game_states] # [trial x time_bin,]
+
+    # Calculate mean and SEM firing rates across trials.
+    # mean_frs = np.nanmean(spike_mat, axis=0)
+    # sem_frs = stats.sem(spike_mat, axis=0, nan_policy='omit')
+    mean_frs = [np.nanmean(_spike_mat, axis=0) for _spike_mat in spike_mat]
+    sem_frs = [stats.sem(_spike_mat, axis=0, nan_policy='omit') for _spike_mat in spike_mat]
+
+    # Make plot.
+    # ax.fill_between(np.arange(len(mean_frs)), mean_frs + sem_frs, mean_frs - sem_frs,
+    #                 color=linecolor, linewidth=0, alpha=alpha)
+    # ax.plot(mean_frs, color=linecolor, linewidth=linewidth)
+
+    for ii in range(len(game_states)):
+        xvals = np.arange(v_lines[ii], v_lines[ii+1]) + 0.5
+        ax.fill_between(xvals,
+                        mean_frs[ii] + sem_frs[ii],
+                        mean_frs[ii] - sem_frs[ii],
+                        color=linecolor, linewidth=0, alpha=alpha)
+        ax.plot(xvals, mean_frs[ii],
+                color=linecolor, linewidth=linewidth)
+    
+    if plot_vlines:
+        for x in v_lines[1:-1]:
+            ax.axvline(x=x, color='k', alpha=1, linewidth=ax_linewidth)
+
+    # Configure plot params.
+    xmin = xticks[0]-int(1000/timebin_size)
+    xmax = xticks[-1]+int(1000/timebin_size)
+    mean_frs = np.concatenate(mean_frs)
+    sem_frs = np.concatenate(sem_frs)
+    ymin = kws.pop('ymin', np.max((0, np.floor(np.min(mean_frs - sem_frs)))))
+    ymax = kws.pop('ymax', np.ceil(np.max(mean_frs + sem_frs)))
+    yticks = kws.pop('yticks', np.round(np.linspace(ymin, ymax, 3), 1))
+    for axis in ['left', 'bottom']:
+        ax.spines[axis].set_linewidth(ax_linewidth)
+    ax.tick_params(axis='both', which='both', length=2, width=ax_linewidth, pad=1)
+    ax.set_xlim([xmin, xmax])
+    ax.set_xticks(xticks)
+    ax.set_xticklabels(xticklabels, fontsize=font['tick'], rotation=0)
+    ax.set_ylim([ymin, ymax])
+    ax.set_yticks(yticks)
+    ax.set_yticklabels(yticks, fontsize=font['tick'], rotation=0)
+    if plot_labels:
+        ax.set_xlabel('Time (s)', fontsize=font['label'], labelpad=labelpad)
+        ax.set_ylabel('Firing rate (Hz)', fontsize=font['label'], labelpad=labelpad)
+    if plot_game_states:
+        annot_x = v_lines[:-1] + (np.diff(v_lines) / 2)
+        for ii in range(len(annot_x)):
+            ax.text(annot_x[ii]/v_lines[-1], 1.1, game_states[ii].replace('Delay', 'Delay '),
+                    ha='center', va='center', fontsize=font['annot'], transform=ax.transAxes)
+    if plot_title:
+        hemroi = spike_preproc.roi_lookup(subj_sess, neuron.split('-')[0])
+        ax_title = '{}-{} ({})'.format(subj_sess, neuron, hemroi)
+        if len(game_states) == 1:
+            ax_title += ', {}'.format(game_states[0])
+        ax.set_title(ax_title, loc='left', pad=6, fontsize=font['fig'])
+        
     return ax
 
 
