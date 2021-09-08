@@ -416,13 +416,38 @@ def roi_mapping(n=3):
     Parameters
     ----------
     n : int
-        How many regions to map to. 
-        For n=3, regions are hippocampus, MTL (amygdala + EC + 
-        parahippocampus), and cortex (other).
-        For n=5, regions are hippocampus, amygdala, entorhinal cortex, 
-        frontal lobe, and cortex (other).
+        How many regions to map to.
+        For n=2, regions are MTL (hippocampus, amygdala, EC,
+        parahippocampus), and cortex (all other).
+        For n=3, regions are hippocampus, MTL (amygdala, EC, 
+        parahippocampus), and cortex (all other).
+        For n=4, regions are hippocampus, MTL (amygdala, EC, 
+        parahippocampus), frontal, and cortex (all other).
+        For n=5, regions are hippocampus, MTL (amygdala, EC,
+        parahippocampus), frontal, temporal (inferior/lateral),
+        and cortex (all other).
     """
-    if n == 3:
+    if n == 2:
+        rois = {'A': 'MTL',
+                'AC': 'Cortex',
+                'AH': 'MTL',
+                'AI': 'Cortex',
+                'EC': 'MTL',
+                'FOp': 'Cortex',
+                'FOP': 'Cortex',
+                'FSG': 'Cortex',
+                'HGa': 'Cortex',
+                'MFG': 'Cortex',
+                'MH': 'MTL',
+                'O': 'Cortex',
+                'OF': 'Cortex',
+                'PHG': 'MTL',
+                'PI-SMG': 'Cortex',
+                'pSMA': 'Cortex',
+                'TO': 'Cortex',
+                'TP': 'Cortex',
+                'TPO': 'Cortex'}
+    elif n == 3:
         rois = {'A': 'MTL',
                 'AC': 'Cortex',
                 'AH': 'Hippocampus',
@@ -438,26 +463,50 @@ def roi_mapping(n=3):
                 'OF': 'Cortex',
                 'PHG': 'MTL',
                 'PI-SMG': 'Cortex',
+                'pSMA': 'Cortex',
                 'TO': 'Cortex',
+                'TP': 'Cortex',
                 'TPO': 'Cortex'}
-    elif n == 5:
-        rois = {'A': 'Amygdala',
+    elif n == 4:
+        rois = {'A': 'MTL',
                 'AC': 'Frontal',
                 'AH': 'Hippocampus',
-                'AI': 'Frontal',
-                'EC': 'EC',
+                'AI': 'Cortex',
+                'EC': 'MTL',
                 'FOp': 'Frontal',
                 'FOP': 'Frontal',
-                'FSG': 'Cortical',
-                'HGa': 'Cortical',
+                'FSG': 'Cortex',
+                'HGa': 'Cortex',
                 'MFG': 'Frontal',
                 'MH': 'Hippocampus',
-                'O': 'Cortical',
+                'O': 'Cortex',
                 'OF': 'Frontal',
-                'PHG': 'Cortical',
+                'PHG': 'MTL',
                 'PI-SMG': 'Frontal',
-                'TO': 'Cortical',
-                'TPO': 'Cortical'}
+                'pSMA': 'Frontal',
+                'TO': 'Cortex',
+                'TP': 'Cortex',
+                'TPO': 'Cortex'}
+    elif n == 5:
+        rois = {'A': 'MTL',
+                'AC': 'Frontal',
+                'AH': 'Hippocampus',
+                'AI': 'Cortex',
+                'EC': 'MTL',
+                'FOp': 'Frontal',
+                'FOP': 'Frontal',
+                'FSG': 'Temporal',
+                'HGa': 'Temporal',
+                'MFG': 'Frontal',
+                'MH': 'Hippocampus',
+                'O': 'Cortex',
+                'OF': 'Frontal',
+                'PHG': 'MTL',
+                'PI-SMG': 'Frontal',
+                'pSMA': 'Frontal',
+                'TO': 'Temporal',
+                'TP': 'Temporal',
+                'TPO': 'Temporal'}
     else:
         raise ValueError('n={} map regions has not been implemented'.format(n))
 
