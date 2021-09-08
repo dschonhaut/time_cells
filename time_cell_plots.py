@@ -180,6 +180,7 @@ def firing_rate_over_time(subj_sess,
         
     # Get some other params we'll need for plotting.
     timebin_size = 500
+    mult = 1000 / timebin_size
     if isinstance(game_states, str):
         game_states = [game_states]
     game_state_durs = od({game_state: events_proc.get_game_state_durs()[game_state]
@@ -192,7 +193,7 @@ def firing_rate_over_time(subj_sess,
     event_spikes = time_bin_analysis.load_event_spikes(subj_sess, verbose=0)
     # spike_mat = np.concatenate([event_spikes.get_spike_mat(neuron, game_state)
     #                            for game_state in game_states], axis=1) # trial x time_bin
-    spike_mat = [event_spikes.get_spike_mat(neuron, game_state).values
+    spike_mat = [event_spikes.get_spike_mat(neuron, game_state).values * mult
                  for game_state in game_states] # [trial x time_bin,]
 
     # Calculate mean and SEM firing rates across trials.

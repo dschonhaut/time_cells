@@ -36,6 +36,7 @@ class Events(object):
                  subj_sess,
                  remove_bad_trials=True,
                  time_bin_dur=500,
+                 n_head_direc=8,
                  run_all=False,
                  proj_dir='/home1/dscho/projects/time_cells',
                  filename=None,
@@ -73,6 +74,7 @@ class Events(object):
         self.subj_sess = subj_sess
         self.remove_bad_trials = remove_bad_trials
         self.time_bin_dur = time_bin_dur
+        self.n_direc = n_head_direc
         self.proj_dir = proj_dir
         if filename is None:
             self.filename = op.join(self.proj_dir, 'analysis', 'events', 
@@ -315,7 +317,7 @@ class Events(object):
                                                                          x['positionZ'])))
                            .tolist())
             rotation = df['value'].apply(lambda x: x['rotationY'] % 360).tolist()
-            head_direc = [self._head_direction(x) for x in rotation]
+            head_direc = [self._head_direction(x, self.n_direc) for x in rotation]
             
             # Figure out when the player changes position/rotation.
             moved_pos = [x>0 for x in speed]
@@ -816,10 +818,11 @@ def load_events(subj_sess,
                         **kwargs)
     
     # Do any extra formatting.
-    game_states = ['Delay1', 'Encoding', 'ReturnToBase1', 
-                   'Delay2', 'Retrieval', 'ReturnToBase2']
-    game_state_cat = pd.CategoricalDtype(game_states, ordered=True)
-    events.events_behav['gameState'] = events.events_behav['gameState'].astype(game_state_cat)
+    if hasattr(events, 'events_behav'):
+        game_states = ['Delay1', 'Encoding', 'ReturnToBase1', 
+                       'Delay2', 'Retrieval', 'ReturnToBase2']
+        game_state_cat = pd.CategoricalDtype(game_states, ordered=True)
+        events.events_behav['gameState'] = events.events_behav['gameState'].astype(game_state_cat)
 
     return events
 
