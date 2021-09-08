@@ -35,13 +35,19 @@ from sklearn.model_selection import KFold
 from sklearn.svm import LinearSVC
 from sklearn.multiclass import OneVsRestClassifier
 sys.path.append('/home1/dscho/code/general')
+from helper_funcs import str_replace
 import data_io as dio
 sys.path.append('/home1/dscho/code/projects')
 from time_cells import events_proc, spike_preproc
 
 
 class EventSpikes(object):
-    """The event_spikes dataframe and its properties and methods."""
+    """The event_spikes dataframe and its properties and methods.
+
+    EventSpikes combines the behavioral by time bin info contained in 
+    events_behav dataframe within the Events class with spike counts
+    by time bin for each neuron in a session.
+    """
     
     def __init__(self, 
                  subj_sess,
@@ -67,6 +73,7 @@ class EventSpikes(object):
                       game_state,
                       index='trial',
                       column='time_bin',
+                      apply_f=np.sum,
                       qry=None):
         """Return a trial x time_bin dataframe of spikes within game state.
                 
@@ -80,6 +87,8 @@ class EventSpikes(object):
             event_spikes column whose unique values will form the rows of the output dataframe.
         column : str
             event_spikes column whose unique values will form the columns of the output dataframe.
+        apply_f : func
+            The function to apply over grouped values.
         qry : str
             Gets passed to event_spikes.query() to select a subset of rows within the game state
             (e.g. when time_penalty==1).
@@ -87,7 +96,7 @@ class EventSpikes(object):
         spike_mat = self.event_spikes.query("(gameState=='{}')".format(game_state)).copy()
         if qry is not None:
             spike_mat = spike_mat.query(qry)
-        spike_mat = spike_mat.pivot(index=index, columns=column, values=neuron)
+        spike_mat = spike_mat.groupby([index, column])[neuron].apply(apply_f).unstack(column)
         return spike_mat
     
     def _set_column_map(self):
@@ -134,6 +143,7 @@ class EventSpikes(object):
         """
         events = events_proc.load_events(self.subj_sess,
                                          proj_dir=self.proj_dir,
+                                         verbose=False,
                                          run_all=True)
         event_spikes = events.events_behav.copy()
         
@@ -206,7 +216,7 @@ def load_event_spikes(subj_sess,
                       filename=None,
                       overwrite=False,
                       verbose=True):
-    """Load pickled EventSpikes for the session, else instantiate."""
+    """Return EventSpikes from saved file or by instantiating anew."""
     if filename is None:
         filename = op.join(proj_dir, 'analysis', 'events', '{}-EventSpikes.pkl'.format(subj_sess))
 
@@ -221,50 +231,6 @@ def load_event_spikes(subj_sess,
                                    proj_dir=proj_dir,
                                    filename=filename)
     return event_spikes
-
-
-def load_pop_spikes(proj_dir='/home1/dscho/projects/time_cells'):
-    """Return the pop_spikes dataframe and a list of neuron columns.
-
-    Returns
-    -------
-    pop_spikes : DataFrame
-        pop_spikes concatenates spike counts of units across all subject
-        sessions within each trial, game state, and time bin. Each row
-        is a unique time bin, and each column a unique unit.
-    neurons : list
-        List of unique neuron names that make up pop_spikes columns.
-    """
-    # Find all subject sessions.
-    sessions = np.unique([op.basename(f).split('-')[0] 
-                          for f in glob(op.join(proj_dir, 'analysis', 'events', '*-Events.pkl'))])
-    
-    # Load the event_spikes dataframe for each session.
-    game_states = ['Delay1', 'Encoding', 'Delay2', 'Retrieval']
-    event_cols = ['trial', 'gameState', 'time_bin']
-    neurons = []
-    dfs = od([])
-    for subj_sess in sessions:
-        event_spikes = load_event_spikes(subj_sess, verbose=False)
-        neuron_labels = od({neuron: '{}-{}'.format(subj_sess, neuron) 
-                            for neuron in event_spikes.column_map['neurons']})
-        dfs[subj_sess] = (event_spikes.event_spikes.query("(gameState=={})".format(game_states))
-                                                   .rename(columns=neuron_labels)
-                                                   .loc[:, event_cols + list(neuron_labels.values())]
-                                                   .set_index(event_cols))
-        neurons += list(neuron_labels.values())
-    
-    # Concatentate spiking data for each unit, within each time bin, across sessions.
-    pop_spikes = pd.concat(dfs, axis=1)
-    pop_spikes.columns = pop_spikes.columns.get_level_values(1)
-    pop_spikes = pop_spikes.reset_index()
-
-    # Sort rows of the output dataframe by trial, game state, and time bin.
-    game_state_cat = pd.CategoricalDtype(game_states, ordered=True)
-    pop_spikes['gameState'] = pop_spikes['gameState'].astype(game_state_cat)
-    pop_spikes = pop_spikes.sort_values(['trial', 'gameState', 'time_bin']).reset_index(drop=True)
-    
-    return pop_spikes, neurons
 
 
 def model_unit_fr(subj_sess,
@@ -352,8 +318,10 @@ def ols_fit(neuron,
             event_spikes,
             game_state,
             n_perm=0,
-            regress_trial=True,
-            perm_method='circshift'):
+            regress_trial=False,
+            perm_method='circshift',
+            event_spikes_idx=None,
+            mod_names=None):
     """Fit firing rates using OLS regression.
     
     Parameters
@@ -374,6 +342,12 @@ def ols_fit(neuron,
     perm_method : str
         Determines how the firing rate vector will be randomized to 
         obtain a null distribution. 'circshift' or 'shuffle'
+    event_spikes_idx : list
+        Only event_spikes rows that correspond to the provided index
+        labels are used in the regression model.
+    mod_names : list
+        Will run only models defined in both mod_names and formulas;
+        otherwise runs models for all formulas.
     
     Returns
     -------
@@ -381,7 +355,10 @@ def ols_fit(neuron,
         Contains model fits from real and shuffled spike data.
     """
     # Select rows for the chosen game state.
-    df = event_spikes.event_spikes.query("(gameState=='{}')".format(game_state)).copy()
+    if event_spikes_idx is None:
+        df = event_spikes.event_spikes.query("(gameState=='{}')".format(game_state)).copy()
+    else:
+        df = event_spikes.event_spikes.loc[event_spikes_idx].copy()
 
     # For delays, sum spikes across time bins within each time step, within each trial.
     if game_state in ['Delay1', 'Delay2']:
@@ -396,29 +373,37 @@ def ols_fit(neuron,
     trial_term = ' + C(trial)' if regress_trial else ''
     formulas = od([])
     if game_state in ['Delay1', 'Delay2']:
-        formulas['time'] = "Q('{}') ~ 1 + C(time_step){}".format(neuron, trial_term)
-        formulas['icpt'] = "Q('{}') ~ 1               {}".format(neuron, trial_term)
-
-    elif game_state in ['Encoding', 'Retrieval']:
-        formulas['time_place'] = "Q('{}') ~ 1 + C(time_step) + C(maze_region){}".format(neuron, trial_term)
-        formulas['place']      = "Q('{}') ~ 1                + C(maze_region){}".format(neuron, trial_term)
-        formulas['time']       = "Q('{}') ~ 1 + C(time_step)                 {}".format(neuron, trial_term)
-
-        dig_term = ' + dig_performed' if (game_state == 'Retrieval') else ''
-        formulas['full']          = "Q('{}') ~ 1 + C(time_step) + C(maze_region) + C(head_direc) + is_moving + base_in_view + gold_in_view{}{}".format(neuron, dig_term, trial_term)
-        formulas['full_subtime']  = "Q('{}') ~ 1                + C(maze_region) + C(head_direc) + is_moving + base_in_view + gold_in_view{}{}".format(neuron, dig_term, trial_term)
-        formulas['full_subplace'] = "Q('{}') ~ 1 + C(time_step)                  + C(head_direc) + is_moving + base_in_view + gold_in_view{}{}".format(neuron, dig_term, trial_term)
-        formulas['full_subhd']    = "Q('{}') ~ 1 + C(time_step) + C(maze_region)                 + is_moving + base_in_view + gold_in_view{}{}".format(neuron, dig_term, trial_term)
-        formulas['full_subbiv']   = "Q('{}') ~ 1 + C(time_step) + C(maze_region) + C(head_direc) + is_moving                + gold_in_view{}{}".format(neuron, dig_term, trial_term)
-        formulas['full_subgiv']   = "Q('{}') ~ 1 + C(time_step) + C(maze_region) + C(head_direc) + is_moving + base_in_view               {}{}".format(neuron, dig_term, trial_term)
+        formulas['full']          = "Q('{}') ~ 1 + C(time_step){}".format(neuron, trial_term)
+        formulas['full_subtime']  = "Q('{}') ~ 1               {}".format(neuron, trial_term)
+    elif game_state == 'Encoding':
+        formulas['full']          = "Q('{}') ~ 1 + C(time_step) + C(maze_region) + C(head_direc) + is_moving + base_in_view + gold_in_view{}".format(neuron, trial_term)
+        formulas['full_subtime']  = "Q('{}') ~ 1                + C(maze_region) + C(head_direc) + is_moving + base_in_view + gold_in_view{}".format(neuron, trial_term)
+        formulas['full_subplace'] = "Q('{}') ~ 1 + C(time_step)                  + C(head_direc) + is_moving + base_in_view + gold_in_view{}".format(neuron, trial_term)
+        formulas['full_subhd']    = "Q('{}') ~ 1 + C(time_step) + C(maze_region)                 + is_moving + base_in_view + gold_in_view{}".format(neuron, trial_term)
+        formulas['full_submvmt']  = "Q('{}') ~ 1 + C(time_step) + C(maze_region) + C(head_direc)             + base_in_view + gold_in_view{}".format(neuron, trial_term)
+        formulas['full_subbiv']   = "Q('{}') ~ 1 + C(time_step) + C(maze_region) + C(head_direc) + is_moving                + gold_in_view{}".format(neuron, trial_term)
+        formulas['full_subgiv']   = "Q('{}') ~ 1 + C(time_step) + C(maze_region) + C(head_direc) + is_moving + base_in_view               {}".format(neuron, trial_term)
+    elif game_state == 'Retrieval':
+        formulas['full']          = "Q('{}') ~ 1 + C(time_step) + C(maze_region) + C(head_direc) + is_moving + base_in_view + dig_performed{}".format(neuron, trial_term)
+        formulas['full_subtime']  = "Q('{}') ~ 1                + C(maze_region) + C(head_direc) + is_moving + base_in_view + dig_performed{}".format(neuron, trial_term)
+        formulas['full_subplace'] = "Q('{}') ~ 1 + C(time_step)                  + C(head_direc) + is_moving + base_in_view + dig_performed{}".format(neuron, trial_term)
+        formulas['full_subhd']    = "Q('{}') ~ 1 + C(time_step) + C(maze_region)                 + is_moving + base_in_view + dig_performed{}".format(neuron, trial_term)
+        formulas['full_submvmt']  = "Q('{}') ~ 1 + C(time_step) + C(maze_region) + C(head_direc)             + base_in_view + dig_performed{}".format(neuron, trial_term)
+        formulas['full_subbiv']   = "Q('{}') ~ 1 + C(time_step) + C(maze_region) + C(head_direc) + is_moving                + dig_performed{}".format(neuron, trial_term)
+        formulas['full_subdig']   = "Q('{}') ~ 1 + C(time_step) + C(maze_region) + C(head_direc) + is_moving + base_in_view                {}".format(neuron, trial_term)
 
     # Fit the models.
+    if mod_names is None:
+        mod_names = list(formulas.keys())
+    else:
+        mod_names = [k for k in mod_names if k in formulas.keys()]
+
     res = od([])
-    for mod_name in formulas.keys():
+    for mod_name in mod_names:
         res[mod_name] = ols(formulas[mod_name], data=df).fit()
 
     # Fit the same models to shuffled spike counts.
-    res_null = od({k: [] for k in formulas.keys()})
+    res_null = od({k: [] for k in mod_names})
     for iPerm in range(n_perm):
         # Permute the firing rate vector.
         if perm_method == 'circshift':
@@ -429,7 +414,7 @@ def ols_fit(neuron,
             raise RuntimeError("Permutation method '{}' not recognized".format(perm_method))
 
         # Fit the model.
-        for mod_name in formulas.keys():
+        for mod_name in mod_names:
             res_null[mod_name].append(ols(formulas[mod_name], data=df).fit())
         
     model_fits = od({'subj_sess': event_spikes.subj_sess, 
@@ -551,7 +536,7 @@ def glm_fit(neuron,
 
 
 def get_model_pairs(model_fits):
-    """Compare GLM fits between predefined model pairs.
+    """Compare fits between predefined model pairs.
     
     Parameters
     ----------
@@ -572,11 +557,18 @@ def get_model_pairs(model_fits):
         for mod_name in model_fits[game_state]['obs'].keys():
             param_cols += [param for param in model_fits[game_state]['obs'][mod_name].params.index
                            if (param not in param_cols)]
-    
+    replace_vals = {'time_step': 'time', 
+                    'maze_region': 'place', 
+                    'head_direc': 'hd',
+                    'C(': '',
+                    ')[T.': '-',
+                    ']': ''}
+    param_col_names = str_replace(param_cols, replace_vals)
+
     # Iterate over each constrast in the model comparison dataframe
     # and add on the GLM fit variables.
     model_comp = _get_model_comp()
-    model_output_cols = ['llf_full', 'lr', 'z_lr', 'df', 'chi_pval', 'emp_pval', 'null_hist'] + param_cols
+    model_output_cols = ['llf_full', 'lr', 'z_lr', 'df', 'chi_pval', 'emp_pval', 'null_hist'] + param_col_names
     model_output = []
     for iRow, row in model_comp.iterrows():
         game_state = row['gameState']
@@ -586,10 +578,12 @@ def get_model_pairs(model_fits):
         full_mod = row['full']
         reduced_mod = row['reduced']
 
-        # Get full model parameter weights.
-        params = od({k: np.nan for k in param_cols})
-        for k, v in model_fits[game_state]['obs'][full_mod].params.to_dict().items():
-            params[k] = v
+        # Get full model parameter weights and Z-scored weights relative
+        # to the null distribution.
+        obs_params = model_fits[game_state]['obs'][full_mod].params
+        params = od([])
+        for k in param_cols:
+            params[k] = obs_params.get(k, np.nan)
 
         # Peform a likelihood ratio test on the full vs. reduced models.
         llf_full = model_fits[game_state]['obs'][full_mod].llf
@@ -630,22 +624,20 @@ def _get_model_comp():
     """Define pairwise comparisons between full and reduced models."""
     cols = ['gameState', 'testvar', 'reduced', 'full']
     model_comp = [
-        ['Delay1', 'time', 'icpt', 'time'],
-        ['Delay2', 'time', 'icpt', 'time'],
-        ['Encoding', 'time', 'place', 'time_place'],
-        ['Encoding', 'place', 'time', 'time_place'],
-        ['Encoding', 'time', 'full_subtime', 'full'],
-        ['Encoding', 'place', 'full_subplace', 'full'],
-        ['Encoding', 'head_direc', 'full_subhd', 'full'],
-        ['Encoding', 'base_in_view', 'full_subbiv', 'full'],
-        ['Encoding', 'gold_in_view', 'full_subgiv', 'full'],
-        ['Retrieval', 'time', 'place', 'time_place'],
-        ['Retrieval', 'place', 'time', 'time_place'],
-        ['Retrieval', 'time', 'full_subtime', 'full'],
-        ['Retrieval', 'place', 'full_subplace', 'full'],
-        ['Retrieval', 'head_direc', 'full_subhd', 'full'],
-        ['Retrieval', 'base_in_view', 'full_subbiv', 'full'],
-        ['Retrieval', 'gold_in_view', 'full_subgiv', 'full']
+        ['Delay1',    'time',          'full_subtime',  'full'],
+        ['Delay2',    'time',          'full_subtime',  'full'],
+        ['Encoding',  'time',          'full_subtime',  'full'],
+        ['Encoding',  'place',         'full_subplace', 'full'],
+        ['Encoding',  'head_direc',    'full_subhd',    'full'],
+        ['Encoding',  'is_moving',     'full_submvmt',  'full'],
+        ['Encoding',  'base_in_view',  'full_subbiv',   'full'],
+        ['Encoding',  'gold_in_view',  'full_subgiv',   'full'],
+        ['Retrieval', 'time',          'full_subtime',  'full'],
+        ['Retrieval', 'place',         'full_subplace', 'full'],
+        ['Retrieval', 'head_direc',    'full_subhd',    'full'],
+        ['Retrieval', 'is_moving',     'full_submvmt',  'full'],
+        ['Retrieval', 'base_in_view',  'full_subbiv',   'full'],
+        ['Retrieval', 'dig_performed', 'full_subdig',   'full']
     ]
     model_comp = pd.DataFrame(model_comp, columns=cols)
     return model_comp
