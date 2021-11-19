@@ -21,6 +21,7 @@ from collections import OrderedDict as od
 import numpy as np
 import pandas as pd
 import scipy.stats as stats
+from scipy.ndimage.filters import gaussian_filter1d
 
 # Plots
 import matplotlib.pyplot as plt
@@ -133,7 +134,8 @@ def time_raster(subj_sess,
     if 'ymin' in kws and 'ymax' in kws:
         ax.set_ylim([kws['ymin'], kws['ymax']+1])
     ax.invert_yaxis()
-    yticks = np.arange(6, len(events.keep_trials)+1, 6, dtype=np.int)
+    # yticks = np.arange(12, len(events.keep_trials)+1, 12, dtype=np.int)
+    yticks = [10, 20, 30]
     ax.set_yticks(yticks)
     ax.set_yticklabels(yticks, fontsize=font['tick'], rotation=0)
     if plot_labels:
@@ -156,6 +158,9 @@ def time_raster(subj_sess,
 def firing_rate_over_time(subj_sess,
                           neuron,
                           game_states=['Delay1', 'Encoding', 'Delay2', 'Retrieval'],
+                          overlap=False,
+                          smooth=0,
+                          plot_grand_mean=False,
                           plot_vlines=True,
                           plot_labels=True,
                           plot_game_states=True,
@@ -169,9 +174,16 @@ def firing_rate_over_time(subj_sess,
     """
     # Get user-defined params.
     font = kws.pop('font', {'tick': 6, 'label': 7, 'annot': 7, 'fig': 9})
-    linecolor = kws.pop('linecolor', '#e10600')
+    if overlap:
+        linecolor = kws.pop('linecolor', ['#e10600', '#296eb4'])
+        linestyle = kws.pop('linestyle', ['-', '--'])
+    else:
+        linecolor = kws.pop('linecolor', '#e10600')
+        linestyle = kws.pop('linestyle', '-')
     linewidth = kws.pop('linewidth', 0.6)
     alpha = kws.pop('alpha', 0.15)
+    grand_mean_color = kws.pop('grand_mean_color', '#296eb4')
+    grand_mean_linestyle = kws.pop('grand_mean_linestyle', '--')
     labelpad = kws.pop('labelpad', 1)
     xtick_inc = kws.pop('xtick_inc', 10)
     ax_linewidth = kws.pop('ax_linewidth', 0.5)
@@ -185,38 +197,56 @@ def firing_rate_over_time(subj_sess,
         game_states = [game_states]
     game_state_durs = od({game_state: events_proc.get_game_state_durs()[game_state]
                           for game_state in game_states})
-    v_lines = (np.cumsum([0] + list(game_state_durs.values())) / timebin_size).astype(int)
+    if overlap:
+        v_lines = (np.array([0, np.max(list(game_state_durs.values()))]) / timebin_size).astype(int)
+    else:
+        v_lines = (np.cumsum([0] + list(game_state_durs.values())) / timebin_size).astype(int)
     xticks = np.arange(0, v_lines[-1] + 1, int((xtick_inc*1000)/timebin_size))
     xticklabels = (xticks * (timebin_size/1000)).astype(int)
     
     # Get spikes for each trial, in each time bin.
     event_spikes = time_bin_analysis.load_event_spikes(subj_sess, verbose=0)
-    # spike_mat = np.concatenate([event_spikes.get_spike_mat(neuron, game_state)
-    #                            for game_state in game_states], axis=1) # trial x time_bin
     spike_mat = [event_spikes.get_spike_mat(neuron, game_state).values * mult
                  for game_state in game_states] # [trial x time_bin,]
 
+    # Smooth spike counts.
+    if smooth > 0:
+        for ii in range(len(spike_mat)):
+            spike_mat[ii] = np.array([gaussian_filter1d(spike_mat[ii][iTrial, :].astype(float), smooth)
+                                      for iTrial in range(spike_mat[ii].shape[0])])
+
     # Calculate mean and SEM firing rates across trials.
-    # mean_frs = np.nanmean(spike_mat, axis=0)
-    # sem_frs = stats.sem(spike_mat, axis=0, nan_policy='omit')
     mean_frs = [np.nanmean(_spike_mat, axis=0) for _spike_mat in spike_mat]
     sem_frs = [stats.sem(_spike_mat, axis=0, nan_policy='omit') for _spike_mat in spike_mat]
+    grand_mean = [np.mean(np.nanmean(_spike_mat, axis=1)) for _spike_mat in spike_mat]
+    grand_sem = [stats.sem(np.nanmean(_spike_mat, axis=1)) for _spike_mat in spike_mat]
 
     # Make plot.
-    # ax.fill_between(np.arange(len(mean_frs)), mean_frs + sem_frs, mean_frs - sem_frs,
-    #                 color=linecolor, linewidth=0, alpha=alpha)
-    # ax.plot(mean_frs, color=linecolor, linewidth=linewidth)
-
     for ii in range(len(game_states)):
-        xvals = np.arange(v_lines[ii], v_lines[ii+1]) + 0.5
+        if overlap:
+            xvals = np.arange(mean_frs[ii].size) + 0.5
+            _linecolor = linecolor[ii]
+            _linestyle = linestyle[ii]
+        else:
+            xvals = np.arange(v_lines[ii], v_lines[ii+1]) + 0.5
+            _linecolor = linecolor
+            _linestyle = linestyle
+        if plot_grand_mean:
+            ax.fill_between(xvals,
+                            ([grand_mean[ii]] * xvals.size) + grand_sem[ii],
+                            ([grand_mean[ii]] * xvals.size) - grand_sem[ii],
+                            color=grand_mean_color, linewidth=0, alpha=alpha)
         ax.fill_between(xvals,
                         mean_frs[ii] + sem_frs[ii],
                         mean_frs[ii] - sem_frs[ii],
-                        color=linecolor, linewidth=0, alpha=alpha)
+                        color=_linecolor, linewidth=0, alpha=alpha)
+        if plot_grand_mean:
+            ax.plot(xvals, [grand_mean[ii]] * xvals.size,
+                    color=grand_mean_color, linewidth=linewidth, linestyle=grand_mean_linestyle)
         ax.plot(xvals, mean_frs[ii],
-                color=linecolor, linewidth=linewidth)
+                color=_linecolor, linewidth=linewidth, linestyle=_linestyle)
     
-    if plot_vlines:
+    if plot_vlines & (not overlap):
         for x in v_lines[1:-1]:
             ax.axvline(x=x, color='k', alpha=1, linewidth=ax_linewidth)
 
@@ -255,9 +285,177 @@ def firing_rate_over_time(subj_sess,
     return ax
 
 
+def plot_firing_maze2(subj_sess,
+                      neuron,
+                      scale_by=10,
+                      draw_base=True,
+                      show_nav=True,
+                      show_spikes=True,
+                      only_show_spikes_when_moving=False,
+                      proj_dir='/home1/dscho/projects/time_cells',
+                      **kws):
+    """Plot unit firing by 2D maze position."""
+    # -------------------------------------------------
+    # Get user-defined plot params.
+    colws = kws.pop('colws', {1: 2.05, 2: 3.125, 3: 6.45})
+    grid_shp = (50, 120)
+    figsize = (colws[1], colws[1] * (grid_shp[0]/grid_shp[1]))
+    dpi = kws.pop('dpi', 1200)
+    plt.close()
+    fig = plt.figure(figsize=figsize, dpi=dpi)
+    ax = [plt.subplot2grid(grid_shp, (0, 0), rowspan=50, colspan=50),
+          plt.subplot2grid(grid_shp, (0, 51), rowspan=50, colspan=3),
+          plt.subplot2grid(grid_shp, (0, 66), rowspan=50, colspan=50),
+          plt.subplot2grid(grid_shp, (0, 117), rowspan=50, colspan=3)]
+    game_states = ['Encoding', 'Retrieval']
+    font = kws.pop('font', {'tick': 5, 'label': 6, 'fig': 7})
+    wall_cmap = kws.pop('wall_cmap', 'binary')
+    wall_vmin = kws.pop('wall_vmin', 0)
+    wall_vmax = kws.pop('wall_vmax', 1)
+    fr_cmap = kws.pop('fr_cmap', 'binary_r')
+    base_lw = kws.pop('base_lw', 0.2)
+    base_color = kws.pop('base_color', '#538d89')
+    background_color = kws.pop('background_color', 'k')
+    nav_alpha = kws.pop('nav_alpha', 0.25)
+    nav_lw = kws.pop('nav_lw', 0.06)
+    nav_color = kws.pop('nav_color', '#f0b2b2')
+    spike_marker = kws.pop('spike_marker', 'x')
+    spike_fill_color = kws.pop('spike_fill_color', '#e10600')
+    spike_edge_color = kws.pop('spike_edge_color', 'w')
+    ticklength = kws.pop('ticklength', 1)
+    tickwidth = kws.pop('tickwidth', 0.25)
+    tickpad = kws.pop('tickpad', 1)
+    labelpad = kws.pop('labelpad', 1.5)
+    cbar_label = kws.pop('cbar_label', None)
+    spike_alpha = kws.pop('spike_alpha', 0.5)
+    spike_markersize = kws.pop('spike_markersize', 0.75)
+    spike_mew = kws.pop('spike_mew', 0.15)
+
+    # Load player position and spiking data.
+    events = events_proc.load_events(subj_sess, proj_dir=proj_dir, verbose=False)
+    events.maze.maze.loc[:, 'region_precise'] = events.maze.maze['region_precise'].apply(lambda x: x.replace(' ', '_'))
+    _origin = events.maze.origin * scale_by
+    event_spikes = time_bin_analysis.load_event_spikes(subj_sess, proj_dir=proj_dir, verbose=False)
+
+    # Calculate mean firing rate (Hz) in each maze region.
+    fr_pos = od([])
+    for game_state in game_states:
+        fr_pos[game_state] = (event_spikes.event_spikes.query("(gameState=='{}')".format(game_state))
+                                                       .groupby('maze_region')[neuron].mean() * 2)
+
+    _min = np.min([fr_pos[game_state][np.isfinite(fr_pos[game_state])].min() for game_state in game_states])
+    _max = np.max([fr_pos[game_state][np.isfinite(fr_pos[game_state])].max() for game_state in game_states])
+    kws['vmin'] = kws.get('vmin', np.max((0, _min)))
+    kws['vmax'] = kws.get('vmax', _max)
+
+    # Make the plot.
+    for game_state in game_states:
+        if game_state == 'Encoding':
+            iax = 0
+        else:
+            iax = 2
+
+        # Find the most recent position to each spike.
+        spike_times = spike_preproc.load_spikes(subj_sess, neuron)['spike_times']
+        spike_loc = []
+        for trial in events.keep_trials:
+            qry = "(trial=={}) & (gameState=='{}')".format(trial, game_state)
+            _positions = events.positions.query(qry).reset_index(drop=True)
+            keep_spikes = np.any(events.event_times.query(qry)['time_bins']
+                                                   .apply(lambda x: [x[0]<=spike<x[-1] for spike in spike_times])
+                                                   .tolist(), axis=0)
+            _spike_times = spike_times[keep_spikes]
+            spike_pos_arr = np.array(_positions['start_time']
+                                     .apply(lambda x: [spike - x for spike in _spike_times]).tolist()) # pos x spike
+            spike_pos_arr[spike_pos_arr<0] = 1e6
+            _spike_loc = (_positions.loc[np.argmin(spike_pos_arr, axis=0), 'pos']
+                                    .apply(lambda x: tuple([((x[_i] * scale_by) - _origin[_i]) 
+                                                            for _i in range(len(x))])))
+            if only_show_spikes_when_moving:
+                keep_spikes = _positions.loc[np.argmin(spike_pos_arr, axis=0), 'moved_pos']
+                _spike_loc = _spike_loc[keep_spikes]
+            spike_loc += _spike_loc.tolist()
+        spike_loc = np.array(spike_loc) # spike x (xPos, yPos)
+
+        # Get mean firing at each location.
+        _fr_pos = fr_pos[game_state]
+        shp = events.maze.shape * scale_by
+        maze_fr_mat = np.zeros(shp) * np.nan
+        for idx, maze_row in events.maze.maze.iterrows():
+            if maze_row['region_precise'] in _fr_pos:
+                coords = (np.array(maze_row['coords']) * scale_by) - _origin
+                mesh_coords = tuple(np.meshgrid(range(coords[0][0], coords[1][0]), 
+                                                range(coords[0][1], coords[1][1])))
+                maze_fr_mat[mesh_coords] = _fr_pos[maze_row['region_precise']]
+
+        # Get a mask of the maze walls.
+        mask = np.zeros(shp) * np.nan
+        for idx, maze_row in events.maze.maze.query("(region=='wall')").iterrows():
+            coords = (np.array(maze_row['coords']) * scale_by) - _origin
+            mesh_coords = tuple(np.meshgrid(range(coords[0][0], coords[1][0]), 
+                                            range(coords[0][1], coords[1][1])))
+            mask[mesh_coords] = 1
+
+        # Draw the walls.
+        _ = ax[iax].imshow(mask.T, cmap=wall_cmap, vmin=wall_vmin, vmax=wall_vmax)
+
+        # Draw a border around the base.
+        if draw_base:
+            coords = (np.array(events.maze.maze.query("(region=='base')")['coords'].tolist()) * scale_by) - _origin
+            coords = np.concatenate((coords[:, 0, :], coords[:, 1, :]))
+            base_min = np.min(coords, axis=0)
+            base_max = np.max(coords, axis=0)
+            base_width, base_height = base_max - base_min
+            rect = patches.Rectangle(base_min, base_width, base_height, 
+                                     fill=False, lw=base_lw, ec=base_color)
+            ax[iax].add_patch(rect)
+
+        # Make firing rate by maze region heatmap.
+        ax[iax] = sns.heatmap(maze_fr_mat.T, ax=ax[iax], cbar=True, 
+                              cbar_ax=ax[iax+1], cmap=fr_cmap, **kws)
+
+        # Overlay position trajectories.
+        if show_nav:
+            # all_pos : pd.Series
+            #     keys: trial numbers
+            #     values: (time, (xPos, yPos)) array of position recordings
+            all_pos = (events.positions.query("(gameState=='{}')".format(game_state))
+                                       .groupby(['trial'])['pos']
+                                       .apply(lambda x: (np.array(x.tolist()) * scale_by) - _origin))
+            for trial in all_pos.index:
+                ax[iax].plot(all_pos[trial][:, 0], 
+                             all_pos[trial][:, 1],
+                             lw=nav_lw,
+                             alpha=nav_alpha,
+                             color=nav_color)
+
+        # Overlay spikes.
+        if show_spikes:
+            ax[iax].plot(spike_loc[:, 0], spike_loc[:, 1], lw=0, alpha=spike_alpha, 
+                         marker=spike_marker, ms=spike_markersize, mew=spike_mew,
+                         mfc=spike_fill_color, mec=spike_edge_color)
+        
+        # Configure the colorbar.
+        cbar = ax[iax].collections[0].colorbar
+        cbar.ax.tick_params(labelsize=font['tick'], length=ticklength, width=tickwidth, pad=tickpad)
+        cbar_ticks = np.linspace(kws['vmin'], kws['vmax'], 5)
+        cbar.set_ticks(cbar_ticks)
+        cbar.set_ticklabels(['{:g}'.format(x) for x in np.round(cbar_ticks, 1)])
+        if cbar_label is not None:
+            cbar.set_label(cbar_label, fontsize=font['label'], labelpad=labelpad)
+        
+        # Tweak other plot params.
+        ax[iax].set_facecolor(background_color)
+        ax[iax].invert_yaxis()
+        ax[iax].set_xticks([])
+        ax[iax].set_yticks([])
+    
+    return fig, ax
+
+
 def plot_firing_maze(subj_sess,
                      neuron,
-                     game_state,
+                     game_states,
                      scale_by=10,
                      draw_base=True,
                      show_nav=True,
@@ -271,12 +469,14 @@ def plot_firing_maze(subj_sess,
     events.maze.maze.loc[:, 'region_precise'] = events.maze.maze['region_precise'].apply(lambda x: x.replace(' ', '_'))
     _origin = events.maze.origin * scale_by
     event_spikes = time_bin_analysis.load_event_spikes(subj_sess, proj_dir=proj_dir, verbose=False)
-    
+    if isinstance(game_states, str):
+        game_states = [game_states]
+
     # Find the most recent position to each spike.
     spike_times = spike_preproc.load_spikes(subj_sess, neuron)['spike_times']
     spike_loc = []
     for trial in events.keep_trials:
-        qry = "(trial=={}) & (gameState=='{}')".format(trial, game_state)
+        qry = "(trial=={}) & (gameState=={})".format(trial, game_states)
         _positions = events.positions.query(qry).reset_index(drop=True)
         keep_spikes = np.any(events.event_times.query(qry)['time_bins']
                                                .apply(lambda x: [x[0]<=spike<x[-1] for spike in spike_times])
@@ -295,7 +495,7 @@ def plot_firing_maze(subj_sess,
     spike_loc = np.array(spike_loc) # spike x (xPos, yPos)
 
     # Calculate mean firing rate (Hz) in each maze region.
-    fr_pos = (event_spikes.event_spikes.query("(gameState=='{}')".format(game_state))
+    fr_pos = (event_spikes.event_spikes.query("(gameState=={})".format(game_states))
                                        .groupby('maze_region')[neuron].mean() * 2)  
     shp = events.maze.shape * scale_by
     maze_fr_mat = np.zeros(shp) * np.nan
@@ -398,8 +598,8 @@ def plot_firing_maze(subj_sess,
         # all_pos : pd.Series
         #     keys: trial numbers
         #     values: (time, (xPos, yPos)) array of position recordings
-        all_pos = (events.positions.query("(gameState=='{}')".format(game_state))
-                                   .groupby('trial')['pos']
+        all_pos = (events.positions.query("(gameState=={})".format(game_states))
+                                   .groupby(['trial', 'gameState'])['pos']
                                    .apply(lambda x: (np.array(x.tolist()) * scale_by) - _origin))
         for trial in all_pos.index:
             ax[iax].plot(all_pos[trial][:, 0], 
