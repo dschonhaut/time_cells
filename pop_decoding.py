@@ -184,9 +184,11 @@ def _combine_time_bins(spike_mat, bins=10):
 
 def classify_time(unit_groups=None,
                   n_subset_units=None,
+                  exclude_ctx=True,
                   game_states=['Delay1', 'Encoding', 'Delay2', 'Retrieval'],
                   time_steps_per_game_state={'Delay1': 10, 'Encoding': 30, 'Delay2': 10, 'Retrieval': 30},
                   drop_first2=False,
+                  save_clfs=False,
                   search_method='random',
                   vals_per_hyperparam=7,
                   hyperparam_n_iter=100,
@@ -227,6 +229,9 @@ def classify_time(unit_groups=None,
         If True, the first 2s of data for each trial interval
         are dropped from the analysis (so e.g., for Delay only
         seconds 2-10 would be considered).
+    save_clfs : bool
+        Determines if the fit observed and null classifiers are
+        included in the dataframe that gets saved and returned.
     search_method : str
         Defines how parameter search will be implemented.
         'grid' uses sklearn's GridSearchCV.
@@ -249,7 +254,7 @@ def classify_time(unit_groups=None,
         
         Does not return a fitted estimator.
         """
-        kfold_inner = n_trials - 1
+        kfold_inner = 5 # n_trials - 1
         inner_cv = KFold(kfold_inner)
 
         if search_method == 'grid':    
@@ -291,7 +296,7 @@ def classify_time(unit_groups=None,
     
     # Load the pop_spikes dataframe (spike counts for units across all subject
     # sessions within each trial, game state, and time bin).
-    pop_spikes = PopSpikes(proj_dir=proj_dir)
+    pop_spikes = load_pop_spikes(exclude_ctx=exclude_ctx)
     trials = pop_spikes.pop_spikes['trial'].unique()
     n_trials = trials.size
     
@@ -480,26 +485,29 @@ def classify_time(unit_groups=None,
                 mean_acc_null = np.mean(accuracy_null)
 
                 # Append results to the output dataframe.
-                clf_results.append([game_state,
-                                    unit_group,
-                                    n_time_steps,
-                                    test,
-                                    best_trainval_score,
-                                    best_trainval_C,
-                                    best_trainval_gamma,
-                                    y_test,
-                                    y_test_pred,
-                                    mean_acc,
-                                    acc_by_time,
-                                    accuracy,
-                                    best_trainval_score_null,
-                                    best_trainval_C_null,
-                                    best_trainval_gamma_null,
-                                    y_test_null,
-                                    y_test_pred_null,
-                                    mean_acc_null,
-                                    acc_by_time_null,
-                                    accuracy_null])
+                new_row = [game_state,
+                           unit_group,
+                           n_time_steps,
+                           test,
+                           best_trainval_score,
+                           best_trainval_C,
+                           best_trainval_gamma,
+                           y_test,
+                           y_test_pred,
+                           mean_acc,
+                           acc_by_time,
+                           accuracy,
+                           best_trainval_score_null,
+                           best_trainval_C_null,
+                           best_trainval_gamma_null,
+                           y_test_null,
+                           y_test_pred_null,
+                           mean_acc_null,
+                           acc_by_time_null,
+                           accuracy_null]
+                if save_clfs:
+                    new_row += [clf, clf_null]
+                clf_results.append(new_row)
 
     cols = ['gameState',
             'unit_group',
@@ -521,6 +529,9 @@ def classify_time(unit_groups=None,
             'mean_acc_null',
             'acc_by_time_null',
             'accuracy_null']
+    if save_clfs:
+        cols += ['clf', 'clf_null']
+
     clf_results = pd.DataFrame(clf_results, columns=cols)
 
     if save_results:
@@ -530,667 +541,6 @@ def classify_time(unit_groups=None,
         print('Done in {:.1f} min'.format((time() - start_time) / 60))
     
     return clf_results
-
-
-# def classify_time(unit_groups=None,
-#                   n_subset_units=None,
-#                   game_states=['Delay1', 'Encoding', 'Delay2', 'Retrieval'],
-#                   time_steps_per_game_state={'Delay1': 10, 'Encoding': 30, 'Delay2': 10, 'Retrieval': 30},
-#                   search_method='random',
-#                   vals_per_hyperparam=7,
-#                   hyperparam_n_iter=100,
-#                   n_jobs=32,
-#                   proj_dir='/home1/dscho/projects/time_cells',
-#                   save_results=True,
-#                   overwrite=True,
-#                   verbose=True):
-#     """Predict time within each game state from population neural activity.
-    
-#     Implements support vector classification (RBF kernel) with repeated,
-#     nested cross-validation to first, optimize C and gamma hyperparaters
-#     on a dataset of trainval trials, and then test the best fitting model
-#     on hold-out test trials.
-    
-#     Parameters
-#     ----------
-#     unit_groups : dict, 'group_name' : ['unit1', 'unit2', ...]
-#         Dict containing lists of units that correspond to columns
-#         of the pop_spikes dataframe.
-#     n_subset_units : int
-#         Determines how many units will be drawn at random from
-#         each unit group. This variable is overwritten if there
-#         is more than one unit group in unit_groups, in which
-#         case it is updated to the minimum number of units across
-#         unit groups.
-#     game_states : list[str]
-#         List of game states to train classifiers on.
-#     time_steps_per_game_state : dict, 'game_state' : int
-#         Defines how many evenly-sized time steps will divide up
-#         each game state in game_states. The time steps for each
-#         game state must evenly divide the number of smaller time
-#         bins that make up each row of the pop_spikes dataframe.
-#         E.g., if Delay1 is divided into 20 time bins each 500ms
-#         long, Delay1 time steps can be 4 or 5 but not 3 or 6, as
-#         these don't divide into 20.
-#     search_method : str
-#         Defines how parameter search will be implemented.
-#         'grid' uses sklearn's GridSearchCV.
-#         'random' uses sklearn's RandomizedSearchCV.
-#     vals_per_hyperparam : int
-#         Only relevant if search_method is 'grid'. Defines how many
-#         values will be searched within the parameter space
-#         for C and gamma. 7, # for grid search
-#     hyperparam_n_iter : int
-#         Only relevant if search_method is 'random'. Defines how many
-#         random points in the parameter space will be searched to find
-#         a best fitting model within each fold of the trainval inner 
-#         cross-validation.
-#     n_jobs : int
-#         Number of jobs to run in parallel for the parameter search inner
-#         cross-validation (the most the time-consuming part of this function).
-#     """
-#     def setup_param_search():
-#         """Setup parameter search over the inner CV and return an estimator.
-        
-#         Does not return a fitted estimator.
-#         """
-#         kfold_inner = n_trials - 1
-#         inner_cv = KFold(kfold_inner)
-
-#         if search_method == 'grid':    
-#             param_grid = {'svc__C'     : np.logspace(-5, 5, vals_per_hyperparam),
-#                           'svc__gamma' : np.logspace(-5, 5, vals_per_hyperparam)}
-#             clf = GridSearchCV(estimator=pipe,
-#                                param_grid=param_grid,
-#                                refit=True,
-#                                cv=inner_cv,
-#                                n_jobs=n_jobs)
-#         elif search_method == 'random':
-#             param_dist = {'svc__C'     : loguniform(1e-9, 1e9),
-#                           'svc__gamma' : loguniform(1e-9, 1e9)}
-#             clf = RandomizedSearchCV(estimator=pipe,
-#                                      param_distributions=param_dist,
-#                                      refit=True,
-#                                      cv=inner_cv,
-#                                      n_jobs=n_jobs,
-#                                      n_iter=hyperparam_n_iter)
-#         return clf
-
-#     def get_mean_accuracy(acc_vec, reshp):
-#         """Return mean accuracy across time_bins.
-
-#         Parameters
-#         ----------
-#         acc_vec : list
-#             Accuracy vector comparing y_test to y_test_pred 
-#             at each time bin, across test trials.
-#         reshp : list
-#             (n_test_trials, n_time_bins)
-#         """
-#         return np.mean(np.array(acc_vec).reshape(reshp), axis=0).tolist()
-    
-#     start_time = time()
-    
-#     # Define hard-coded parameters.
-#     y_col = 'time_step'
-    
-#     # Load the pop_spikes dataframe (spike counts for units across all subject
-#     # sessions within each trial, game state, and time bin).
-#     pop_spikes = PopSpikes(proj_dir=proj_dir)
-#     trials = pop_spikes.pop_spikes['trial'].unique()
-#     n_trials = trials.size
-    
-#     # Setup groups of units to train classifiers on.
-#     if unit_groups is None:
-#         unit_groups = od([('all', pop_spikes.neurons)])
-    
-#     # If more than one unit group is being processed, find the group with
-#     # the fewest number of neurons and assign this number to n_subset_units.
-#     if len(unit_groups) > 1:
-#         n_subset_units = np.min([len(_neurons) for _neurons in unit_groups.values()])
-        
-#     # Split trials into trainval and test sets.
-#     kfold_outer = n_trials
-#     trainval_test = split_trials(trials, n_splits=kfold_outer)
-    
-#     # Get the output filename and return its contents
-#     # if filename exists and overwrite is False.
-#     basename = 'SVC_predicting_{}'.format(y_col)
-#     basename += '-' + '-'.join(['{}units_{}'.format(len(unit_groups[unit_group]), unit_group) for unit_group in unit_groups])
-#     basename += '-{}_search'.format(search_method)
-#     basename += '-{}fold'.format(kfold_outer)
-#     basename += '-{}units_per_subset'.format(n_subset_units) if (n_subset_units is not None) else ''
-#     basename += '-spike_matched' if (len(unit_groups) > 1) else ''
-#     basename += '-' + '-'.join(['{}_{}bins'.format(game_state, time_steps_per_game_state[game_state]) for game_state in game_states])
-#     basename += '.pkl'
-#     filename = op.join(proj_dir, 'analysis', 'classifiers', basename)
-#     if op.exists(filename) and not overwrite:
-#         clf_results = dio.open_pickle(filename)
-#         return clf_results
-    
-#     # Setup the processing pipeline for classification.
-#     # 1. Impute missing data by replacing NaNs with their column-wise median.
-#     # 2. Z-score the values in each column.
-#     # 3. Train a support vector classifier with RBF kernel.
-#     pipe = Pipeline(steps=[('impute', SimpleImputer(strategy='median')),
-#                            ('scale', StandardScaler()),
-#                            ('svc', SVC(kernel='rbf'))])
-    
-#     # Check that the number of time steps evenly divides the number of 
-#     # time bins for each game state.
-#     for game_state in game_states:
-#         n_time_bins = np.unique(pop_spikes.pop_spikes.query("(gameState=='{}')".format(game_state))['time_bin']).size
-#         n_time_steps = time_steps_per_game_state[game_state]
-#         if (n_time_bins % n_time_steps) != 0:
-#             raise ValueError('n_time_steps does not evenly divide n_time_bins for {} ({} % {} != 0)'
-#                              .format(game_state, n_time_bins, n_time_steps))
-    
-#     # Check that all units in unit_groups are columns in pop_spikes.
-#     for unit_group in unit_groups:
-#         _neurons = unit_groups[unit_group]
-#         if not np.all(np.isin(_neurons, pop_spikes.neurons)):
-#             raise ValueError('Some unit names in {} are not in pop_spikes.pop_spikes.columns'
-#                              .format(unit_group))
-    
-#     clf_results = []
-#     for game_state in game_states:
-#         # Randomly select n_subset_units from neurons in the unit group.
-#         pop_spike_grps = od()
-#         for unit_group in unit_groups:
-#             # Select neurons in the unit group.
-#             _neurons = unit_groups[unit_group]
-
-#             # Randomly select n_subset_units from neurons in the unit group.
-#             if (n_subset_units is not None) and (len(_neurons) > n_subset_units):
-#                 __neurons = np.random.permutation(_neurons).tolist()[:n_subset_units]
-#             else:
-#                 __neurons = _neurons
-#             if verbose:
-#                 print('{}: Fitting {} neurons from {}, {:.1f} min'
-#                       .format(game_state, len(__neurons), unit_group, (time() - start_time) / 60))
-                
-#             # Select a subset of pop_spikes rows and columns.
-#             _pop_spikes = pop_spikes.pop_spikes.query("(gameState=='{}')".format(game_state)).copy()
-            
-#             # Aggregate time bins into a defined number of equal-size, larger time steps.
-#             n_time_bins = np.unique(_pop_spikes['time_bin']).size
-#             n_time_steps = time_steps_per_game_state[game_state]
-#             bins_per_step = int(n_time_bins / n_time_steps)
-#             _pop_spikes.insert(2, 'time_step', _pop_spikes['time_bin'].apply(lambda time_bin: int(time_bin/bins_per_step)))
-
-#             # For each unit, sum spikes within each time step.
-#             _pop_spikes = _pop_spikes.groupby(['gameState', 'trial', 'time_step'], observed=True)[__neurons].apply(np.sum).reset_index()
-                
-#             pop_spike_grps[unit_group] = _pop_spikes
-            
-#         # Match the number of spikes retained between unit groups,
-#         # sorting the neurons in each unit group by firing rate and then
-#         # randomly removing spikes from each neuron as needed.
-#         keep_spikes = np.min(np.concatenate([[pop_spike_grps[unit_group].iloc[:, 3:].sum().sort_values()]
-#                                              for unit_group in unit_groups], axis=0), axis=0)
-#         for unit_group in unit_groups:
-#             _keep_spikes = pd.Series(data=keep_spikes,
-#                                      index=pop_spike_grps[unit_group].iloc[:, 3:].sum().sort_values().index.values,
-#                                      dtype=int)
-#             for neuron, n_spikes in _keep_spikes.iteritems():
-#                 spike_vec = pop_spike_grps[unit_group][neuron].values
-#                 n_remove = spike_vec.sum() - n_spikes
-#                 while n_remove > 0:
-#                     iRow = np.random.randint(spike_vec.size)
-#                     if spike_vec[iRow] > 0:
-#                         spike_vec[iRow] -= 1
-#                         n_remove -= 1
-
-#         # Train classifiers to predict time from population neural activity.
-#         for unit_group in unit_groups:
-#             _pop_spikes = pop_spike_grps[unit_group]
-#             __neurons = _pop_spikes.columns[3:].values
-
-#             # Perform nested cross-validation, splitting trials into
-#             # test and nested train/val sets.
-#             for iFold in range(kfold_outer):
-#                 # Select the test and trainval trials.
-#                 trainval, test = trainval_test[iFold]
-
-#                 # ---------------------------------
-#                 # Observed data:
-#                 #
-#                 # Split trials into trainval and test sets.
-#                 X_trainval = _pop_spikes.loc[np.isin(_pop_spikes['trial'], trainval)][__neurons].values
-#                 y_trainval = _pop_spikes.loc[np.isin(_pop_spikes['trial'], trainval)][y_col].values
-#                 X_test = _pop_spikes.loc[np.isin(_pop_spikes['trial'], test)][__neurons].values
-#                 y_test = _pop_spikes.loc[np.isin(_pop_spikes['trial'], test)][y_col].values
-
-#                 # Setup grid search on the inner CV.
-#                 clf = setup_param_search()
-
-#                 # Train the model on trainval data.
-#                 clf.fit(X_trainval, y_trainval)
-#                 best_trainval_score = clf.best_score_
-#                 best_trainval_C = clf.best_params_['svc__C']
-#                 best_trainval_gamma = clf.best_params_['svc__gamma']
-
-#                 # Predict time from neural activity on test data.
-#                 y_test_pred = clf.predict(X_test).tolist()
-
-#                 # Calculate accuracy.
-#                 accuracy = [y_test_pred[iVal]==y_test[iVal] for iVal in range(len(y_test))]
-#                 acc_by_time = get_mean_accuracy(accuracy, reshp=(len(test), n_time_steps))
-#                 mean_acc = np.mean(accuracy)
-
-#                 # ---------------------------------
-#                 # Null distribution:
-#                 #
-#                 # Circ-shift time steps within each trial to randomize 
-#                 # time_step ~ pop_spiking associations across trials.
-#                 shuf_idx = np.concatenate(_pop_spikes.reset_index()
-#                                                      .groupby('trial')['index']
-#                                                      .apply(lambda x: np.roll(x, np.random.randint(0, len(x))))
-#                                                      .tolist())
-#                 _pop_spikes_null = _pop_spikes.copy()
-#                 _pop_spikes_null[y_col] = _pop_spikes_null.loc[shuf_idx, y_col].values
-
-#                 # Split trials into trainval and test sets, using the same split as
-#                 # for the observed data.
-#                 X_test_null = _pop_spikes_null.loc[np.isin(_pop_spikes_null['trial'], test)][__neurons].values
-#                 y_test_null = _pop_spikes_null.loc[np.isin(_pop_spikes_null['trial'], test)][y_col].values
-#                 X_trainval_null = _pop_spikes_null.loc[np.isin(_pop_spikes_null['trial'], trainval)][__neurons].values
-#                 y_trainval_null = _pop_spikes_null.loc[np.isin(_pop_spikes_null['trial'], trainval)][y_col].values
-
-#                 # Setup grid search on the inner CV.
-#                 clf_null = setup_param_search()
-
-#                 # Train the model on trainval data.
-#                 clf_null.fit(X_trainval_null, y_trainval_null)
-#                 best_trainval_score_null = clf_null.best_score_
-#                 best_trainval_C_null = clf_null.best_params_['svc__C']
-#                 best_trainval_gamma_null = clf_null.best_params_['svc__gamma']
-
-#                 # Predict time from neural activity on test data.
-#                 y_test_pred_null = clf_null.predict(X_test_null).tolist()
-
-#                 # Calculate accuracy.
-#                 accuracy_null = [y_test_pred_null[iVal]==y_test_null[iVal] for iVal in range(len(y_test_null))]
-#                 acc_by_time_null = get_mean_accuracy(accuracy_null, reshp=(len(test), n_time_steps))
-#                 mean_acc_null = np.mean(accuracy_null)
-
-#                 # Append results to the output dataframe.
-#                 clf_results.append([game_state,
-#                                     unit_group,
-#                                     n_time_steps,
-#                                     test,
-#                                     best_trainval_score,
-#                                     best_trainval_C,
-#                                     best_trainval_gamma,
-#                                     y_test,
-#                                     y_test_pred,
-#                                     mean_acc,
-#                                     acc_by_time,
-#                                     accuracy,
-#                                     best_trainval_score_null,
-#                                     best_trainval_C_null,
-#                                     best_trainval_gamma_null,
-#                                     y_test_null,
-#                                     y_test_pred_null,
-#                                     mean_acc_null,
-#                                     acc_by_time_null,
-#                                     accuracy_null])
-
-#     cols = ['gameState',
-#             'unit_group',
-#             'n_time_steps',
-#             'test_trials',
-#             'best_trainval_score',
-#             'best_trainval_C',
-#             'best_trainval_gamma',
-#             'y_test',
-#             'y_test_pred',
-#             'mean_acc',
-#             'acc_by_time',
-#             'accuracy',
-#             'best_trainval_score_null',
-#             'best_trainval_C_null',
-#             'best_trainval_gamma_null',
-#             'y_test_null',
-#             'y_test_pred_null',
-#             'mean_acc_null',
-#             'acc_by_time_null',
-#             'accuracy_null']
-#     clf_results = pd.DataFrame(clf_results, columns=cols)
-
-#     if save_results:
-#         dio.save_pickle(clf_results, filename, verbose=verbose)
-    
-#     if verbose:
-#         print('Done in {:.1f} min'.format((time() - start_time) / 60))
-    
-#     return clf_results
-
-
-# def classify_time(unit_groups=None,
-#                   n_subset_units=None,
-#                   unit_group_n_perm=10,
-#                   game_states=['Delay1', 'Encoding', 'Delay2', 'Retrieval'],
-#                   time_steps_per_game_state={'Delay1': 10, 'Encoding': 30, 'Delay2': 10, 'Retrieval': 30},
-#                   search_method='random',
-#                   vals_per_hyperparam=7,
-#                   hyperparam_n_iter=100,
-#                   n_jobs=32,
-#                   proj_dir='/home1/dscho/projects/time_cells',
-#                   save_results=True,
-#                   overwrite=True,
-#                   verbose=True):
-#     """Predict time within each game state from population neural activity.
-    
-#     Implements support vector classification (RBF kernel) with repeated,
-#     nested cross-validation to first, optimize C and gamma hyperparaters
-#     on a dataset of trainval trials, and then test the best fitting model
-#     on hold-out test trials.
-    
-#     Parameters
-#     ----------
-#     unit_groups : dict, 'group_name' : ['unit1', 'unit2', ...]
-#         Dict containing lists of units that correspond to columns
-#         of the pop_spikes dataframe.
-#     n_subset_units : int
-#         Determines how many units will be drawn at random from
-#         each unit group unit_group_n_perm times, with separate
-#         classifiers being trained for each iteration. This
-#         variable is overwritten if there is more than one
-#         unit group in unit_groups, in which case it is updated
-#         to the minimum number of units across unit groups.
-#     unit_group_n_perm : int
-#         Only relevant if there is >1 unit group in unit_groups
-#         or if n_subset_units is defined. Determines how many
-#         permutations of n_subset_units will be drawn from each
-#         unit group.
-#     game_states : list[str]
-#         List of game states to train classifiers on.
-#     time_steps_per_game_state : dict, 'game_state' : int
-#         Defines how many evenly-sized time steps will divide up
-#         each game state in game_states. The time steps for each
-#         game state must evenly divide the number of smaller time
-#         bins that make up each row of the pop_spikes dataframe.
-#         E.g., if Delay1 is divided into 20 time bins each 500ms
-#         long, Delay1 time steps can be 4 or 5 but not 3 or 6, as
-#         these don't divide into 20.
-#     search_method : str
-#         Defines how parameter search will be implemented.
-#         'grid' uses sklearn's GridSearchCV.
-#         'random' uses sklearn's RandomizedSearchCV.
-#     vals_per_hyperparam : int
-#         Only relevant if search_method is 'grid'. Defines how many
-#         values will be searched within the parameter space
-#         for C and gamma. 7, # for grid search
-#     hyperparam_n_iter : int
-#         Only relevant if search_method is 'random'. Defines how many
-#         random points in the parameter space will be searched to find
-#         a best fitting model within each fold of the trainval inner 
-#         cross-validation.
-#     n_jobs : int
-#         Number of jobs to run in parallel for the parameter search inner
-#         cross-validation (the most the time-consuming part of this function).
-#     """
-#     def setup_param_search():
-#         """Setup parameter search over the inner CV and return an estimator.
-        
-#         Does not return a fitted estimator.
-#         """
-#         kfold_inner = n_trials - 1
-#         inner_cv = KFold(kfold_inner)
-
-#         if search_method == 'grid':    
-#             param_grid = {'svc__C'     : np.logspace(-5, 5, vals_per_hyperparam),
-#                           'svc__gamma' : np.logspace(-5, 5, vals_per_hyperparam)}
-#             clf = GridSearchCV(estimator=pipe,
-#                                param_grid=param_grid,
-#                                refit=True,
-#                                cv=inner_cv,
-#                                n_jobs=n_jobs)
-#         elif search_method == 'random':
-#             param_dist = {'svc__C'     : loguniform(1e-9, 1e9),
-#                           'svc__gamma' : loguniform(1e-9, 1e9)}
-#             clf = RandomizedSearchCV(estimator=pipe,
-#                                      param_distributions=param_dist,
-#                                      refit=True,
-#                                      cv=inner_cv,
-#                                      n_jobs=n_jobs,
-#                                      n_iter=hyperparam_n_iter)
-#         return clf
-
-#     def get_mean_accuracy(acc_vec, reshp):
-#         """Return mean accuracy across time_bins.
-
-#         Parameters
-#         ----------
-#         acc_vec : list
-#             Accuracy vector comparing y_test to y_test_pred 
-#             at each time bin, across test trials.
-#         reshp : list
-#             (n_test_trials, n_time_bins)
-#         """
-#         return np.mean(np.array(acc_vec).reshape(reshp), axis=0).tolist()
-    
-#     start_time = time()
-    
-#     # Define hard-coded parameters.
-#     y_col = 'time_step'
-    
-#     # Load the pop_spikes dataframe (spike counts for units across all subject
-#     # sessions within each trial, game state, and time bin).
-#     pop_spikes = PopSpikes(proj_dir=proj_dir)
-#     trials = pop_spikes.pop_spikes['trial'].unique()
-#     n_trials = trials.size
-    
-#     # Setup groups of units to train classifiers on.
-#     if unit_groups is None:
-#         unit_groups = od([('all', pop_spikes.neurons)])
-    
-#     # If more than one unit group is being processed, find the group with
-#     # the fewest number of neurons and assign this number to n_subset_units.
-#     if len(unit_groups) > 1:
-#         n_subset_units = np.min([len(_neurons) for _neurons in unit_groups.values()])
-        
-#     # Split trials into trainval and test sets.
-#     kfold_outer = n_trials
-#     trainval_test = split_trials(trials, n_splits=kfold_outer)
-    
-#     # Get the output filename and return its contents
-#     # if filename exists and overwrite is False.
-#     basename = 'SVC_predicting_{}'.format(y_col)
-#     basename += '-' + '-'.join(['{}units_{}'.format(len(unit_groups[unit_group]), unit_group) for unit_group in unit_groups])
-#     basename += '-{}_search'.format(search_method)
-#     basename += '-{}fold'.format(kfold_outer)
-#     basename += '-{}units_per_subset'.format(n_subset_units) if (n_subset_units is not None) else ''
-#     basename += '-{}perms_per_unit_group'.format(unit_group_n_perm) if (n_subset_units is not None) else ''
-#     basename += '-' + '-'.join(['{}_{}bins'.format(game_state, time_steps_per_game_state[game_state]) for game_state in game_states])
-#     basename += '.pkl'
-#     filename = op.join(proj_dir, 'analysis', 'classifiers', basename)
-#     if op.exists(filename) and not overwrite:
-#         clf_results = dio.open_pickle(filename)
-#         return clf_results
-    
-#     # Setup the processing pipeline for classification.
-#     # 1. Impute missing data by replacing NaNs with their column-wise median.
-#     # 2. Z-score the values in each column.
-#     # 3. Train a support vector classifier with RBF kernel.
-#     pipe = Pipeline(steps=[('impute', SimpleImputer(strategy='median')),
-#                            ('scale', StandardScaler()),
-#                            ('svc', SVC(kernel='rbf'))])
-    
-#     # Check that the number of time steps evenly divides the number of 
-#     # time bins for each game state.
-#     for game_state in game_states:
-#         n_time_bins = np.unique(pop_spikes.pop_spikes.query("(gameState=='{}')".format(game_state))['time_bin']).size
-#         n_time_steps = time_steps_per_game_state[game_state]
-#         if (n_time_bins % n_time_steps) != 0:
-#             raise ValueError('n_time_steps does not evenly divide n_time_bins for {} ({} % {} != 0)'
-#                              .format(game_state, n_time_bins, n_time_steps))
-    
-#     # Check that all units in unit_groups are columns in pop_spikes.
-#     for unit_group in unit_groups:
-#         _neurons = unit_groups[unit_group]
-#         if not np.all(np.isin(_neurons, pop_spikes.neurons)):
-#             raise ValueError('Some unit names in {} are not in pop_spikes.pop_spikes.columns'
-#                              .format(unit_group))
-    
-#     # Train classifiers to predict time from population neural activity.
-#     clf_results = []
-#     for unit_group in unit_groups:
-#         # Select neurons in the unit group.
-#         _neurons = unit_groups[unit_group]
-        
-#         # Determine how many times to loop over classifier fitting for each game state.
-#         if n_subset_units is None:
-#             unit_group_n_perm = 1
-        
-#         # Classify.
-#         for iLoop in range(unit_group_n_perm):
-#             # Randomly select n_subset_units from neurons in the unit group.
-#             if (n_subset_units is not None) and (len(_neurons) > n_subset_units):
-#                 __neurons = np.random.permutation(_neurons).tolist()[:n_subset_units]
-#                 if verbose:
-#                     print('iLoop {} - fitting {} neurons from {}'.format(iLoop, len(__neurons), unit_group))
-#             else:
-#                 __neurons = _neurons
-
-#             for game_state in game_states:
-#                 if verbose:
-#                     print('{}, {}, loop {}, fitting {} neurons: {:.1f} min'.format(unit_group, game_state, iLoop, len(__neurons), (time() - start_time) / 60))
-
-#                 # Select time bins across trials for the current game state.
-#                 _pop_spikes = pop_spikes.pop_spikes.query("(gameState=='{}')".format(game_state)).copy()
-
-#                 # Aggregate time bins into a defined number of equal-size, larger time steps.
-#                 n_time_bins = np.unique(_pop_spikes['time_bin']).size
-#                 n_time_steps = time_steps_per_game_state[game_state]
-#                 bins_per_step = int(n_time_bins / n_time_steps)
-#                 _pop_spikes.insert(2, 'time_step', _pop_spikes['time_bin'].apply(lambda time_bin: int(time_bin/bins_per_step)))
-
-#                 # For each unit, sum spikes within each time step.
-#                 _pop_spikes = _pop_spikes.groupby(['gameState', 'trial', 'time_step'], observed=True)[__neurons].apply(np.sum).reset_index()
-
-#                 # Perform nested cross-validation, splitting trials into
-#                 # test and nested train/val sets.
-#                 for iFold in range(kfold_outer):
-#                     # Select the test and trainval trials.
-#                     trainval, test = trainval_test[iFold]
-
-#                     # ---------------------------------
-#                     # Observed data:
-#                     #
-#                     # Split trials into trainval and test sets.
-#                     X_trainval = _pop_spikes.loc[np.isin(_pop_spikes['trial'], trainval)][__neurons].values
-#                     y_trainval = _pop_spikes.loc[np.isin(_pop_spikes['trial'], trainval)][y_col].values
-#                     X_test = _pop_spikes.loc[np.isin(_pop_spikes['trial'], test)][__neurons].values
-#                     y_test = _pop_spikes.loc[np.isin(_pop_spikes['trial'], test)][y_col].values
-
-#                     # Setup grid search on the inner CV.
-#                     clf = setup_param_search()
-
-#                     # Train the model on trainval data.
-#                     clf.fit(X_trainval, y_trainval)
-#                     best_trainval_score = clf.best_score_
-#                     best_trainval_C = clf.best_params_['svc__C']
-#                     best_trainval_gamma = clf.best_params_['svc__gamma']
-
-#                     # Predict time from neural activity on test data.
-#                     y_test_pred = clf.predict(X_test).tolist()
-
-#                     # Calculate accuracy.
-#                     accuracy = [y_test_pred[iVal]==y_test[iVal] for iVal in range(len(y_test))]
-#                     acc_by_time = get_mean_accuracy(accuracy, reshp=(len(test), n_time_steps))
-#                     mean_acc = np.mean(accuracy)
-
-#                     # ---------------------------------
-#                     # Null distribution:
-#                     #
-#                     # Circ-shift time steps within each trial to randomize 
-#                     # time_step ~ pop_spiking associations across trials.
-#                     shuf_idx = np.concatenate(_pop_spikes.reset_index()
-#                                                          .groupby('trial')['index']
-#                                                          .apply(lambda x: np.roll(x, np.random.randint(0, len(x))))
-#                                                          .tolist())
-#                     _pop_spikes_null = _pop_spikes.copy()
-#                     _pop_spikes_null[y_col] = _pop_spikes_null.loc[shuf_idx, y_col].values
-
-#                     # Split trials into trainval and test sets, using the same split as
-#                     # for the observed data.
-#                     X_test_null = _pop_spikes_null.loc[np.isin(_pop_spikes_null['trial'], test)][__neurons].values
-#                     y_test_null = _pop_spikes_null.loc[np.isin(_pop_spikes_null['trial'], test)][y_col].values
-#                     X_trainval_null = _pop_spikes_null.loc[np.isin(_pop_spikes_null['trial'], trainval)][__neurons].values
-#                     y_trainval_null = _pop_spikes_null.loc[np.isin(_pop_spikes_null['trial'], trainval)][y_col].values
-
-#                     # Setup grid search on the inner CV.
-#                     clf_null = setup_param_search()
-
-#                     # Train the model on trainval data.
-#                     clf_null.fit(X_trainval_null, y_trainval_null)
-#                     best_trainval_score_null = clf_null.best_score_
-#                     best_trainval_C_null = clf_null.best_params_['svc__C']
-#                     best_trainval_gamma_null = clf_null.best_params_['svc__gamma']
-
-#                     # Predict time from neural activity on test data.
-#                     y_test_pred_null = clf_null.predict(X_test_null).tolist()
-
-#                     # Calculate accuracy.
-#                     accuracy_null = [y_test_pred_null[iVal]==y_test_null[iVal] for iVal in range(len(y_test_null))]
-#                     acc_by_time_null = get_mean_accuracy(accuracy_null, reshp=(len(test), n_time_steps))
-#                     mean_acc_null = np.mean(accuracy_null)
-
-#                     # Append results to the output dataframe.
-#                     clf_results.append([unit_group,
-#                                         iLoop,
-#                                         game_state,
-#                                         n_time_steps,
-#                                         test,
-#                                         best_trainval_score,
-#                                         best_trainval_C,
-#                                         best_trainval_gamma,
-#                                         y_test,
-#                                         y_test_pred,
-#                                         mean_acc,
-#                                         acc_by_time,
-#                                         accuracy,
-#                                         best_trainval_score_null,
-#                                         best_trainval_C_null,
-#                                         best_trainval_gamma_null,
-#                                         y_test_null,
-#                                         y_test_pred_null,
-#                                         mean_acc_null,
-#                                         acc_by_time_null,
-#                                         accuracy_null])
-
-#     cols = ['unit_group',
-#             'loop',
-#             'gameState',
-#             'n_time_steps',
-#             'test_trials',
-#             'best_trainval_score',
-#             'best_trainval_C',
-#             'best_trainval_gamma',
-#             'y_test',
-#             'y_test_pred',
-#             'mean_acc',
-#             'acc_by_time',
-#             'accuracy',
-#             'best_trainval_score_null',
-#             'best_trainval_C_null',
-#             'best_trainval_gamma_null',
-#             'y_test_null',
-#             'y_test_pred_null',
-#             'mean_acc_null',
-#             'acc_by_time_null',
-#             'accuracy_null']
-#     clf_results = pd.DataFrame(clf_results, columns=cols)
-
-#     if save_results:
-#         dio.save_pickle(clf_results, filename, verbose=verbose)
-    
-#     if verbose:
-#         print('Done in {:.1f} min'.format((time() - start_time) / 60))
-    
-#     return clf_results
 
 
 def split_trials(trials=None,
