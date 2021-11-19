@@ -18,6 +18,7 @@ Last Edited
 """
 import sys
 import os.path as op
+import copy
 from glob import glob
 from collections import OrderedDict as od
 import itertools
@@ -27,6 +28,7 @@ import mkl
 mkl.set_num_threads(1)
 import numpy as np
 import scipy.stats as stats
+from scipy.ndimage.filters import gaussian_filter1d
 import pandas as pd
 import statsmodels.api as sm
 from statsmodels.formula.api import ols
@@ -35,7 +37,7 @@ from sklearn.model_selection import KFold
 from sklearn.svm import LinearSVC
 from sklearn.multiclass import OneVsRestClassifier
 sys.path.append('/home1/dscho/code/general')
-from helper_funcs import str_replace
+from helper_funcs import str_replace, strip_space
 import data_io as dio
 sys.path.append('/home1/dscho/code/projects')
 from time_cells import events_proc, spike_preproc
@@ -231,6 +233,1053 @@ def load_event_spikes(subj_sess,
                                    proj_dir=proj_dir,
                                    filename=filename)
     return event_spikes
+
+
+def get_ols_delay_formulas(neuron, df):
+    """Define model formulas for single-unit to behavior comparisons.
+    
+    Parameters
+    ----------
+    neuron : str
+        e.g. '5-2' would be channel 5, unit 2
+    df : DataFrame
+        Contains the dependent variable and all independent variables.
+        
+    Returns
+    -------
+    Xy : dataframe
+        Contains the dependent variable and independent variables, with
+        all categorical variables deviation-coded.
+    Xycols : dict[list]
+        Xy column names, grouped by variable type.
+    formulas : dict[str]
+        Full and reduced model formulas.
+    """
+    # Setup the full model.
+    param_map = {'neuron': neuron,
+                 'gameState': 'C(gameState, Sum)',
+                 'time'  : 'C(time_step, Sum)'}
+    formula = strip_space("Q('{_[neuron]}') ~ 1 + {_[gameState]} + {_[time]} + {_[gameState]}:{_[time]}"
+                          .format(_=param_map))
+    full_mod = ols(formula, data=df)
+    
+    # Get the expanded predictor matrix of deviation-coded parameters,
+    # and insert the dependent variable column.
+    Xy = pd.concat((pd.Series(full_mod.endog, name=neuron),
+                    pd.DataFrame(full_mod.exog, columns=full_mod.exog_names)),
+                   axis=1)
+    Xy.drop(columns=['Intercept'], inplace=True)
+    
+    # Rename columns for the Xy dataframe.
+    Xycols_old = od([('neuron', [neuron]),
+                     ('gameState',      [col for col in Xy.columns if np.all([('gameState' in col),
+                                                                              ('time_step' not in col),
+                                                                              (':' not in col)])]),
+                     ('time',           [col for col in Xy.columns if np.all([('gameState' not in col),
+                                                                              ('time_step' in col),
+                                                                              (':' not in col)])]),
+                     ('gameState:time', [col for col in Xy.columns if np.all([('time' in col),
+                                                                              ('gameState' in col),
+                                                                              (':' in col)])])])
+    
+    Xycols_new = od([])
+    param_map = od([])
+    for cols in Xycols_old:
+        Xycols_new[cols] = str_replace(Xycols_old[cols], {'C(gameState, Sum)[S.': 'gameState_',
+                                                          'C(time_step, Sum)[S.': 'time_',
+                                                          ']': ''})
+        Xy.rename(columns=pd.Series(index=Xycols_old[cols], data=Xycols_new[cols]).to_dict(), inplace=True)
+        param_map[cols] = ' + '.join(Xycols_new[cols])    
+    Xycols = Xycols_new
+
+    # --------------------------------------------
+    # --------------------------------------------
+    # Define formulas for full and reduced models.
+    formulas = od([])
+
+    # ---------------------------------------------------------
+    # full models firing rate as a function of gameState, time,
+    # and their interaction.
+    formulas['full']                     = strip_space("Q('{_[neuron]}') ~ 1 + {_[gameState]} + {_[time]} + {_[gameState:time]}".format(_=param_map))
+    # Fixed firing rate differences between encoding and retrieval, holding constant time and its interaction with gameState.
+    formulas['full-gameState']           = strip_space("Q('{_[neuron]}') ~ 1                  + {_[time]} + {_[gameState:time]}".format(_=param_map))
+    # Time cells, with or without remapping, holding constant fixed differences between encoding and retrieval firing.
+    formulas['full-time,gameState:time'] = strip_space("Q('{_[neuron]}') ~ 1 + {_[gameState]}                                  ".format(_=param_map))
+    # Context-invariant time cells, holding constant gameState and its interaction with time.
+    formulas['full-time']                = strip_space("Q('{_[neuron]}') ~ 1 + {_[gameState]}             + {_[gameState:time]}".format(_=param_map))
+    # Trial state remapping time cells, holding constant time and gameState main effects.
+    formulas['full-gameState:time']      = strip_space("Q('{_[neuron]}') ~ 1 + {_[gameState]} + {_[time]}                      ".format(_=param_map))
+    
+    return Xy, Xycols, formulas, param_map
+
+
+def run_ols_delay(subj_sess_unit,
+                  formula_func=get_ols_delay_formulas,
+                  game_states=['Delay1', 'Delay2'],
+                  n_perm=1000,
+                  alpha=0.05,
+                  mod_names=None,
+                  mult_by=1,
+                  proj_dir='/home1/dscho/projects/time_cells',
+                  save_output=True,
+                  overwrite=True,
+                  verbose=False):
+    """Run time regression analysis for one neuron.
+    
+    Returns
+    -------
+    mod_pairs : dataframe
+        Likelihood ratio and empirical p-value for each model comparison.
+    ols_weights : dataframe
+        Beta weights and Z-scored weights for full model parameters.
+    """
+    # Load event and neuron info.
+    subj_sess, *neuron = subj_sess_unit.split('-')
+    neuron = '-'.join(neuron)
+    event_spikes = load_event_spikes(subj_sess, proj_dir=proj_dir, verbose=verbose)
+    hem, *roi = spike_preproc.roi_lookup(subj_sess, neuron.split('-')[0], proj_dir=proj_dir)
+    roi = ''.join(roi)
+    
+    # List the models that we want to extract weights for.
+    if mod_names is None:
+        mod_names = ['full']
+
+    # Fit models to real data.
+    ols_mods, Xy, Xycols, *_ = get_ols_delay_mods(neuron,
+                                                  event_spikes,
+                                                  formula_func=formula_func,
+                                                  game_states=game_states,
+                                                  circshift_frs=False)
+    paired_comps = _get_paired_comps('delay')
+    mod_pairs = get_ols_mod_pairs(ols_mods,
+                                  paired_comps)
+    ols_weights = get_ols_weights(ols_mods,
+                                  Xycols,
+                                  mod_names=mod_names,
+                                  mult_by=mult_by)
+
+    # Fit null models.
+    mod_pairs_null = []
+    ols_weights_null = []
+    for iPerm in range(n_perm):
+        _ols_mods_null, *_ = get_ols_delay_mods(neuron,
+                                                event_spikes,
+                                                formula_func=formula_func,
+                                                game_states=game_states,
+                                                circshift_frs=True)
+        mod_pairs_null.append(get_ols_mod_pairs(_ols_mods_null,
+                                                paired_comps))
+        ols_weights_null.append(get_ols_weights(_ols_mods_null,
+                                                Xycols,
+                                                mod_names=mod_names,
+                                                mult_by=mult_by))
+    mod_pairs_null = pd.concat(mod_pairs_null, axis=0).reset_index(drop=True)    
+    ols_weights_null = pd.concat(ols_weights_null, axis=0).reset_index(drop=True)
+
+    # Test significance and Z-score weights against the null distribution.
+    mod_pairs[['z_lr', 'emp_pval']] = mod_pairs.apply(lambda x: _get_emp_pval(x, mod_pairs_null), axis=1).tolist()
+    mod_pairs['sig'] = mod_pairs['emp_pval'].apply(lambda x: x < alpha)
+    ols_weights['z_weight'] = ols_weights.apply(lambda x: _zscore_weights(x, ols_weights_null), axis=1)
+    
+    # Add unique identifiers.
+    for _df in (mod_pairs, ols_weights):
+        _df.insert(0, 'subj_sess_unit', subj_sess_unit)
+        _df.insert(1, 'hem', hem)
+        _df.insert(2, 'roi', roi)
+        _df.insert(3, 'gameState', '-'.join(game_states))
+        
+    # Save outputs.
+    if save_output:
+        mod_pairs_file = op.join(proj_dir, 'analysis', 'unit_to_behav',
+                                 '{}-{}-{}-ols_model_pairs.pkl'.format(subj_sess, neuron, '_'.join(game_states)))
+        ols_weights_file = op.join(proj_dir, 'analysis', 'unit_to_behav',
+                                   '{}-{}-{}-ols_weights.pkl'.format(subj_sess, neuron, '_'.join(game_states)))
+        if overwrite or not op.exists(mod_pairs_file):
+            dio.save_pickle(mod_pairs, mod_pairs_file, verbose)
+        if overwrite or not op.exists(ols_weights_file):
+            dio.save_pickle(ols_weights, ols_weights_file, verbose)
+
+    return mod_pairs, ols_weights
+
+
+def get_ols_delay_mods(neuron,
+                       event_spikes,
+                       formula_func,
+                       game_states=['Delay1', 'Delay2'],
+                       event_spikes_idx=None,
+                       circshift_frs=False):
+    """Find the most important time bin.
+    Fit firing rates using OLS regression, iteratively removing
+    each time step from the data and recording 
+    
+    Parameters
+    ----------
+    neuron : str
+        e.g. '5-2' would be channel 5, unit 2
+    event_spikes : pd.DataFrame
+        EventSpikes instance that contains the event_spikes dataframe,
+        an expanded version of the behav_events dataframe with columns 
+        added for each neuron.
+    game_states : list[str]
+        Delay1, Encoding, Delay2, or Retrieval.
+    event_spikes_idx : list
+        Only event_spikes rows that correspond to the provided index
+        labels are used in the regression model. Overrides querying
+        by gameState.
+    
+    Returns
+    -------
+    ols_mods : dict[statsmodels.regression.linear_model.OLS]
+    Xy : dataframe
+        Contains the dependent variable and independent variables, with
+        all categorical variables deviation-coded.
+    Xycols : dict[list]
+        Xy column names, grouped by variable type.
+    formulas : dict[str]
+        Full and reduced model formulas.
+    """
+    # Select rows for the chosen game states.
+    if type(game_states) == str:
+        game_states = [game_states]
+    if event_spikes_idx is None:
+        _event_spikes = event_spikes.event_spikes.query("(gameState=={})".format(game_states)).copy()
+    else:
+        _event_spikes = event_spikes.event_spikes.loc[event_spikes_idx].copy()
+    _event_spikes['gameState'] = _event_spikes['gameState'].astype(str)
+    
+    # For delays, sum spikes across time bins within each time step, within each trial.
+    _event_spikes = (_event_spikes.groupby(['gameState', 'trial', 'time_step'])
+                                  .agg({neuron: np.sum})
+                                  .reset_index())
+        
+    # Circ-shift firing rates within each trial interval,
+    # then shuffle trial intervals across game states.
+    if circshift_frs:
+        _event_spikes[neuron] = _circshift_shuffle(_event_spikes, neuron, ['trial', 'gameState'])
+            
+    # Fit the model.
+    Xy, Xycols, formulas, param_map = formula_func(neuron, _event_spikes)
+    ols_mods = od([])
+    for mod, formula in formulas.items():
+        ols_mods[mod] = ols(formula, data=Xy)
+    
+    return ols_mods, Xy, Xycols, formulas, param_map
+    
+
+def get_ols_nav_formulas(neuron, 
+                         df):
+    """Define model formulas for single-unit to behavior comparisons.
+    
+    Parameters
+    ----------
+    neuron : str
+        e.g. '5-2' would be channel 5, unit 2
+    df : DataFrame
+        Contains the dependent variable and all independent variables.
+        
+    Returns
+    -------
+    Xy : dataframe
+        Contains the dependent variable and independent variables, with
+        all categorical variables deviation-coded.
+    Xycols : dict[list]
+        Xy column names, grouped by variable type.
+    formulas : dict[str]
+        Full and reduced model formulas.
+    """
+    # ------------------------------------------------------------------------
+    # Setup a model with all parameters that we want to use across all models.
+    param_map = {'neuron'    : neuron,
+                 'gameState' : 'C(gameState, Sum)',
+                 'time'      : 'C(time_step, Sum)',
+                 'place'     : 'C(maze_region, Sum)',
+                 'headDirec' : 'C(head_direc, Sum)',
+                 'isMoving'  : 'C(is_moving, Sum(0))',
+                 'baseView'  : 'C(base_in_view, Sum(0))',
+                 'goldView'  : 'C(gold_in_view, Sum(0))',
+                 'digAction' : 'C(dig_performed, Sum(0))', 
+                 'penalty'   : 'C(time_penalty, Sum(0))',
+                 'goldDug'   : 'gold_dug'}
+    formula = strip_space("Q('{_[neuron]}') ~ 1 + {_[gameState]}                      + {_[time]}                             + {_[place]}                             + "
+                          "                       {_[penalty]}                        + {_[goldDug]}                          + {_[headDirec]}                         + "
+                          "                       {_[isMoving]}                       + {_[baseView]}                         + {_[goldView]}                          + "
+                          "                                                                                                     {_[digAction]}                         + "
+                          "                       {_[gameState]}:{_[time]}            + {_[gameState]}:{_[place]}             + {_[time]}:{_[place]}                   + "
+                          "                       {_[gameState]}:{_[penalty]}         + {_[time]}:{_[penalty]}                + {_[place]}:{_[penalty]}                + "
+                          "                       {_[gameState]}:{_[goldDug]}         + {_[time]}:{_[goldDug]}                + {_[place]}:{_[goldDug]}                + "
+                          "                       {_[gameState]}:{_[headDirec]}       + {_[gameState]}:{_[isMoving]}          + {_[gameState]}:{_[baseView]}             "
+                          .format(_=param_map))
+    mod = ols(formula, data=df)
+    
+    # Get the expanded predictor matrix of deviation-coded parameters,
+    # and insert the dependent variable column.
+    Xy = pd.concat((pd.Series(mod.endog, name=neuron),
+                    pd.DataFrame(mod.exog, columns=mod.exog_names)),
+                   axis=1)
+    Xy.drop(columns=['Intercept'], inplace=True)
+    
+    # ------------------------------------
+    # Rename columns for the Xy dataframe.
+    Xycols_old = od([('neuron',              [neuron]),
+                     ('gameState',           [col for col in Xy.columns if np.all([('gameState'         in col),
+                                                                                   ('time_step'     not in col),
+                                                                                   ('maze_region'   not in col),
+                                                                                   ('head_direc'    not in col),
+                                                                                   ('is_moving'     not in col),
+                                                                                   ('base_in_view'  not in col),
+                                                                                   ('gold_in_view'  not in col),
+                                                                                   ('dig_performed' not in col),
+                                                                                   ('time_penalty'  not in col),
+                                                                                   ('gold_dug'      not in col),
+                                                                                   (':'             not in col)])]),
+                     ('time',                [col for col in Xy.columns if np.all([('gameState'     not in col),
+                                                                                   ('time_step'         in col),
+                                                                                   ('maze_region'   not in col),
+                                                                                   ('head_direc'    not in col),
+                                                                                   ('is_moving'     not in col),
+                                                                                   ('base_in_view'  not in col),
+                                                                                   ('gold_in_view'  not in col),
+                                                                                   ('dig_performed' not in col),
+                                                                                   ('time_penalty'  not in col),
+                                                                                   ('gold_dug'      not in col),
+                                                                                   (':'             not in col)])]),
+                     ('place',               [col for col in Xy.columns if np.all([('gameState'     not in col),
+                                                                                   ('time_step'     not in col),
+                                                                                   ('maze_region'       in col),
+                                                                                   ('head_direc'    not in col),
+                                                                                   ('is_moving'     not in col),
+                                                                                   ('base_in_view'  not in col),
+                                                                                   ('gold_in_view'  not in col),
+                                                                                   ('dig_performed' not in col),
+                                                                                   ('time_penalty'  not in col),
+                                                                                   ('gold_dug'      not in col),
+                                                                                   (':'             not in col)])]),
+                     ('penalty',             [col for col in Xy.columns if np.all([('gameState'     not in col),
+                                                                                   ('time_step'     not in col),
+                                                                                   ('maze_region'   not in col),
+                                                                                   ('head_direc'    not in col),
+                                                                                   ('is_moving'     not in col),
+                                                                                   ('base_in_view'  not in col),
+                                                                                   ('gold_in_view'  not in col),
+                                                                                   ('dig_performed' not in col),
+                                                                                   ('time_penalty'      in col),
+                                                                                   ('gold_dug'      not in col),
+                                                                                   (':'             not in col)])]),
+                     ('goldDug',             [col for col in Xy.columns if np.all([('gameState'     not in col),
+                                                                                   ('time_step'     not in col),
+                                                                                   ('maze_region'   not in col),
+                                                                                   ('head_direc'    not in col),
+                                                                                   ('is_moving'     not in col),
+                                                                                   ('base_in_view'  not in col),
+                                                                                   ('gold_in_view'  not in col),
+                                                                                   ('dig_performed' not in col),
+                                                                                   ('time_penalty'  not in col),
+                                                                                   ('gold_dug'          in col),
+                                                                                   (':'             not in col)])]),
+                     ('headDirec',           [col for col in Xy.columns if np.all([('gameState'     not in col),
+                                                                                   ('time_step'     not in col),
+                                                                                   ('maze_region'   not in col),
+                                                                                   ('head_direc'        in col),
+                                                                                   ('is_moving'     not in col),
+                                                                                   ('base_in_view'  not in col),
+                                                                                   ('gold_in_view'  not in col),
+                                                                                   ('dig_performed' not in col),
+                                                                                   ('time_penalty'  not in col),
+                                                                                   ('gold_dug'      not in col),
+                                                                                   (':'             not in col)])]),
+                     ('isMoving',            [col for col in Xy.columns if np.all([('gameState'     not in col),
+                                                                                   ('time_step'     not in col),
+                                                                                   ('maze_region'   not in col),
+                                                                                   ('head_direc'    not in col),
+                                                                                   ('is_moving'         in col),
+                                                                                   ('base_in_view'  not in col),
+                                                                                   ('gold_in_view'  not in col),
+                                                                                   ('dig_performed' not in col),
+                                                                                   ('time_penalty'  not in col),
+                                                                                   ('gold_dug'      not in col),
+                                                                                   (':'             not in col)])]),
+                     ('baseView',            [col for col in Xy.columns if np.all([('gameState'     not in col),
+                                                                                   ('time_step'     not in col),
+                                                                                   ('maze_region'   not in col),
+                                                                                   ('head_direc'    not in col),
+                                                                                   ('is_moving'     not in col),
+                                                                                   ('base_in_view'      in col),
+                                                                                   ('gold_in_view'  not in col),
+                                                                                   ('dig_performed' not in col),
+                                                                                   ('time_penalty'  not in col),
+                                                                                   ('gold_dug'      not in col),
+                                                                                   (':'             not in col)])]),
+                     ('goldView',            [col for col in Xy.columns if np.all([('gameState'     not in col),
+                                                                                   ('time_step'     not in col),
+                                                                                   ('maze_region'   not in col),
+                                                                                   ('head_direc'    not in col),
+                                                                                   ('is_moving'     not in col),
+                                                                                   ('base_in_view'  not in col),
+                                                                                   ('gold_in_view'      in col),
+                                                                                   ('dig_performed' not in col),
+                                                                                   ('time_penalty'  not in col),
+                                                                                   ('gold_dug'      not in col),
+                                                                                   (':'             not in col)])]),
+                     ('digAction',           [col for col in Xy.columns if np.all([('gameState'     not in col),
+                                                                                   ('time_step'     not in col),
+                                                                                   ('maze_region'   not in col),
+                                                                                   ('head_direc'    not in col),
+                                                                                   ('is_moving'     not in col),
+                                                                                   ('base_in_view'  not in col),
+                                                                                   ('gold_in_view'  not in col),
+                                                                                   ('dig_performed'     in col),
+                                                                                   ('time_penalty'  not in col),
+                                                                                   ('gold_dug'      not in col),
+                                                                                   (':'             not in col)])]),
+                     ('gameState:time',      [col for col in Xy.columns if np.all([('gameState'         in col),
+                                                                                   ('time_step'         in col),
+                                                                                   ('maze_region'   not in col),
+                                                                                   ('head_direc'    not in col),
+                                                                                   ('is_moving'     not in col),
+                                                                                   ('base_in_view'  not in col),
+                                                                                   ('gold_in_view'  not in col),
+                                                                                   ('dig_performed' not in col),
+                                                                                   ('time_penalty'  not in col),
+                                                                                   ('gold_dug'      not in col),
+                                                                                   (':'                 in col)])]),
+                     ('gameState:place',     [col for col in Xy.columns if np.all([('gameState'         in col),
+                                                                                   ('time_step'     not in col),
+                                                                                   ('maze_region'       in col),
+                                                                                   ('head_direc'    not in col),
+                                                                                   ('is_moving'     not in col),
+                                                                                   ('base_in_view'  not in col),
+                                                                                   ('gold_in_view'  not in col),
+                                                                                   ('dig_performed' not in col),
+                                                                                   ('time_penalty'  not in col),
+                                                                                   ('gold_dug'      not in col),
+                                                                                   (':'                 in col)])]),
+                     ('time:place',          [col for col in Xy.columns if np.all([('gameState'     not in col),
+                                                                                   ('time_step'         in col),
+                                                                                   ('maze_region'       in col),
+                                                                                   ('head_direc'    not in col),
+                                                                                   ('is_moving'     not in col),
+                                                                                   ('base_in_view'  not in col),
+                                                                                   ('gold_in_view'  not in col),
+                                                                                   ('dig_performed' not in col),
+                                                                                   ('time_penalty'  not in col),
+                                                                                   ('gold_dug'      not in col),
+                                                                                   (':'                 in col)])]),
+                     ('gameState:penalty',   [col for col in Xy.columns if np.all([('gameState'         in col),
+                                                                                   ('time_step'     not in col),
+                                                                                   ('maze_region'   not in col),
+                                                                                   ('head_direc'    not in col),
+                                                                                   ('is_moving'     not in col),
+                                                                                   ('base_in_view'  not in col),
+                                                                                   ('gold_in_view'  not in col),
+                                                                                   ('dig_performed' not in col),
+                                                                                   ('time_penalty'      in col),
+                                                                                   ('gold_dug'      not in col),
+                                                                                   (':'                 in col)])]),
+                     ('time:penalty',        [col for col in Xy.columns if np.all([('gameState'     not in col),
+                                                                                   ('time_step'         in col),
+                                                                                   ('maze_region'   not in col),
+                                                                                   ('head_direc'    not in col),
+                                                                                   ('is_moving'     not in col),
+                                                                                   ('base_in_view'  not in col),
+                                                                                   ('gold_in_view'  not in col),
+                                                                                   ('dig_performed' not in col),
+                                                                                   ('time_penalty'      in col),
+                                                                                   ('gold_dug'      not in col),
+                                                                                   (':'                 in col)])]),
+                     ('place:penalty',       [col for col in Xy.columns if np.all([('gameState'     not in col),
+                                                                                   ('time_step'     not in col),
+                                                                                   ('maze_region'       in col),
+                                                                                   ('head_direc'    not in col),
+                                                                                   ('is_moving'     not in col),
+                                                                                   ('base_in_view'  not in col),
+                                                                                   ('gold_in_view'  not in col),
+                                                                                   ('dig_performed' not in col),
+                                                                                   ('time_penalty'      in col),
+                                                                                   ('gold_dug'      not in col),
+                                                                                   (':'                 in col)])]),
+                     ('gameState:goldDug',   [col for col in Xy.columns if np.all([('gameState'         in col),
+                                                                                   ('time_step'     not in col),
+                                                                                   ('maze_region'   not in col),
+                                                                                   ('head_direc'    not in col),
+                                                                                   ('is_moving'     not in col),
+                                                                                   ('base_in_view'  not in col),
+                                                                                   ('gold_in_view'  not in col),
+                                                                                   ('dig_performed' not in col),
+                                                                                   ('time_penalty'  not in col),
+                                                                                   ('gold_dug'          in col),
+                                                                                   (':'                 in col)])]),
+                     ('time:goldDug',        [col for col in Xy.columns if np.all([('gameState'     not in col),
+                                                                                   ('time_step'         in col),
+                                                                                   ('maze_region'   not in col),
+                                                                                   ('head_direc'    not in col),
+                                                                                   ('is_moving'     not in col),
+                                                                                   ('base_in_view'  not in col),
+                                                                                   ('gold_in_view'  not in col),
+                                                                                   ('dig_performed' not in col),
+                                                                                   ('time_penalty'  not in col),
+                                                                                   ('gold_dug'          in col),
+                                                                                   (':'                 in col)])]),
+                     ('place:goldDug',       [col for col in Xy.columns if np.all([('gameState'     not in col),
+                                                                                   ('time_step'     not in col),
+                                                                                   ('maze_region'       in col),
+                                                                                   ('head_direc'    not in col),
+                                                                                   ('is_moving'     not in col),
+                                                                                   ('base_in_view'  not in col),
+                                                                                   ('gold_in_view'  not in col),
+                                                                                   ('dig_performed' not in col),
+                                                                                   ('time_penalty'  not in col),
+                                                                                   ('gold_dug'          in col),
+                                                                                   (':'                 in col)])]),
+                     ('gameState:headDirec', [col for col in Xy.columns if np.all([('gameState'         in col),
+                                                                                   ('time_step'     not in col),
+                                                                                   ('maze_region'   not in col),
+                                                                                   ('head_direc'        in col),
+                                                                                   ('is_moving'     not in col),
+                                                                                   ('base_in_view'  not in col),
+                                                                                   ('gold_in_view'  not in col),
+                                                                                   ('dig_performed' not in col),
+                                                                                   ('time_penalty'  not in col),
+                                                                                   ('gold_dug'      not in col),
+                                                                                   (':'                 in col)])]),
+                     ('gameState:isMoving',  [col for col in Xy.columns if np.all([('gameState'         in col),
+                                                                                   ('time_step'     not in col),
+                                                                                   ('maze_region'   not in col),
+                                                                                   ('head_direc'    not in col),
+                                                                                   ('is_moving'         in col),
+                                                                                   ('base_in_view'  not in col),
+                                                                                   ('gold_in_view'  not in col),
+                                                                                   ('dig_performed' not in col),
+                                                                                   ('time_penalty'  not in col),
+                                                                                   ('gold_dug'      not in col),
+                                                                                   (':'                 in col)])]),
+                     ('gameState:baseView',  [col for col in Xy.columns if np.all([('gameState'         in col),
+                                                                                   ('time_step'     not in col),
+                                                                                   ('maze_region'   not in col),
+                                                                                   ('head_direc'    not in col),
+                                                                                   ('is_moving'     not in col),
+                                                                                   ('base_in_view'      in col),
+                                                                                   ('gold_in_view'  not in col),
+                                                                                   ('dig_performed' not in col),
+                                                                                   ('time_penalty'  not in col),
+                                                                                   ('gold_dug'      not in col),
+                                                                                   (':'                 in col)])])])
+                     
+    Xycols_new = od([])
+    param_map = od([])
+    for cols in Xycols_old:
+        Xycols_new[cols] = str_replace(Xycols_old[cols], {'C(gameState, Sum)[S.'        : 'gameState_',
+                                                          'C(time_step, Sum)[S.'        : 'time_',
+                                                          'C(maze_region, Sum)[S.'      : 'place_',
+                                                          'C(time_penalty, Sum(0))[S.'  : 'penalty_',
+                                                          'gold_dug'                    : 'goldDug',
+                                                          'C(head_direc, Sum)[S.'       : 'headDirec_',
+                                                          'C(is_moving, Sum(0))[S.'     : 'isMoving_',
+                                                          'C(base_in_view, Sum(0))[S.'  : 'baseView_',
+                                                          'C(gold_in_view, Sum(0))[S.'  : 'goldView_',
+                                                          'C(dig_performed, Sum(0))[S.' : 'digAction_',
+                                                          ']': ''})
+        Xy.rename(columns=pd.Series(index=Xycols_old[cols], data=Xycols_new[cols]).to_dict(), inplace=True)
+        param_map[cols] = ' + '.join(Xycols_new[cols])    
+    Xycols = Xycols_new
+    
+    # --------------------------------------------
+    # --------------------------------------------
+    # Define formulas for full and reduced models.
+    formulas = od([])
+    
+    # ----------------------------------------------------------------
+    # full models firing rate as a function of gameState, time, place,
+    # and their first-order interactions.
+    formulas['full'] = strip_space("Q('{_[neuron]}') ~ 1 + {_[gameState]}      + {_[time]}            + {_[place]}             + "
+                                   "                       {_[gameState:time]} + {_[gameState:place]} + {_[time:place]}          "
+                                   .format(_=param_map))
+    # Fixed firing rate differences between encoding and retrieval, holding constant
+    # time, place, and their interactions with gameState.
+    formulas['full-gameState'] = " + ".join([val for val in formulas['full'].split(" + ")
+                                             if (val not in param_map['gameState'].split(' + '))])
+    # Time cells, with or without remapping, holding constant place and time:place interactions.
+    formulas['full-time,gameState:time'] = " + ".join([val for val in formulas['full'].split(" + ")
+                                                       if (val not in (param_map['time'].split(' + ') +
+                                                                       param_map['gameState:time'].split(' + ')))])
+    # Context-invariant time cells, holding constant place, gameState, and their interactions with time.
+    formulas['full-time'] = " + ".join([val for val in formulas['full'].split(" + ")
+                                        if (val not in param_map['time'].split(' + '))])
+    # Trial state remapping time cells, holding constant place and time:place interactions.
+    formulas['full-gameState:time'] = " + ".join([val for val in formulas['full'].split(" + ")
+                                                  if (val not in param_map['gameState:time'].split(' + '))])
+    # Place cells, with or without remapping, holding constant time and time:place interactions.
+    formulas['full-place,gameState:place'] = " + ".join([val for val in formulas['full'].split(" + ")
+                                                         if (val not in (param_map['place'].split(' + ') +
+                                                                         param_map['gameState:place'].split(' + ')))])
+    # Context-invariant place cells, holding constant time, gameState, and their interactions with place.
+    formulas['full-place'] = " + ".join([val for val in formulas['full'].split(" + ")
+                                         if (val not in param_map['place'].split(' + '))])
+    # Trial state remapping place cells, holding constant time and time:place interactions.
+    formulas['full-gameState:place'] = " + ".join([val for val in formulas['full'].split(" + ")
+                                                   if (val not in param_map['gameState:place'].split(' + '))])
+    # Joint time x place coding.
+    formulas['full-time:place'] = " + ".join([val for val in formulas['full'].split(" + ")
+                                              if (val not in param_map['time:place'].split(' + '))])
+    
+    # ---------------------------------------------------------------------
+    # full+penalty is the same as full but adds parameters for time penalty
+    # and associated interactions of interest.
+    formulas['full+penalty'] = strip_space(formulas['full'] +
+                                           " +                                                     {_[penalty]}              + "
+                                           "{_[gameState:penalty]} + {_[time:penalty]}           + {_[place:penalty]}          "
+                                           .format(_=param_map))
+    # Interaction between time and penalty.
+    formulas['full+penalty-time:penalty']  = " + ".join([val for val in formulas['full+penalty'].split(" + ")
+                                                         if (val not in param_map['time:penalty'].split(' + '))])
+    # Interaction between place and penalty.
+    formulas['full+penalty-place:penalty'] = " + ".join([val for val in formulas['full+penalty'].split(" + ")
+                                                         if (val not in param_map['place:penalty'].split(' + '))])
+    
+    # ----------------------------------------------------------------------
+    # full+goldDug is the same as full but adds parameters for the number of
+    # golds dug per trial and associated interactions of interest.
+    formulas['full+goldDug'] = strip_space(formulas['full'] +
+                                           " +                                                     {_[goldDug]}              + "
+                                           "{_[gameState:goldDug]} + {_[time:goldDug]}           + {_[place:goldDug]}          "
+                                           .format(_=param_map))
+    # Interaction between time and goldDug.
+    formulas['full+goldDug-time:goldDug']  = " + ".join([val for val in formulas['full+goldDug'].split(" + ")
+                                                         if (val not in param_map['time:goldDug'].split(' + '))])
+    # Interaction between place and goldDug.
+    formulas['full+goldDug-place:goldDug'] = " + ".join([val for val in formulas['full+goldDug'].split(" + ")
+                                                         if (val not in param_map['place:goldDug'].split(' + '))])
+    
+    # -------------------------------------------------------------------
+    # fullMax models firing rate as a function of gameState, time, place,
+    # and their first-order interactions, along with
+    # nuissance covariates and nuissance interactions.
+    formulas['fullMax'] = strip_space("Q('{_[neuron]}') ~ 1 + {_[gameState]}           + {_[time]}               + {_[place]}              + "
+                                      "                       {_[headDirec]}           + {_[isMoving]}           + {_[baseView]}           + "
+                                      "                                                  {_[goldView]}           + {_[digAction]}          + "
+                                      "                       {_[gameState:time]}      + {_[gameState:place]}    + {_[time:place]}         + "
+                                      "                       {_[gameState:headDirec]} + {_[gameState:isMoving]} + {_[gameState:baseView]}   "
+                                      .format(_=param_map))
+    # Fixed firing rate differences between encoding and retrieval, holding constant
+    # time, place, and their interactions with gameState.
+    formulas['fullMax-gameState'] = " + ".join([val for val in formulas['fullMax'].split(" + ")
+                                                if (val not in param_map['gameState'].split(' + '))])
+    # Time cells, with or without remapping, holding constant place and time:place interactions.
+    formulas['fullMax-time,gameState:time'] = " + ".join([val for val in formulas['fullMax'].split(" + ")
+                                                          if (val not in (param_map['time'].split(' + ') +
+                                                                          param_map['gameState:time'].split(' + ')))])
+    # Context-invariant time cells, holding constant place, gameState, and their interactions with time.
+    formulas['fullMax-time'] = " + ".join([val for val in formulas['fullMax'].split(" + ")
+                                           if (val not in param_map['time'].split(' + '))])
+    # Trial state remapping time cells, holding constant place and time:place interactions.
+    formulas['fullMax-gameState:time'] = " + ".join([val for val in formulas['fullMax'].split(" + ")
+                                                     if (val not in param_map['gameState:time'].split(' + '))])
+    # Place cells, with or without remapping, holding constant time and time:place interactions.
+    formulas['fullMax-place,gameState:place'] = " + ".join([val for val in formulas['fullMax'].split(" + ")
+                                                            if (val not in (param_map['place'].split(' + ') +
+                                                                            param_map['gameState:place'].split(' + ')))])
+    # Context-invariant place cells, holding constant time, gameState, and their interactions with place.
+    formulas['fullMax-place'] = " + ".join([val for val in formulas['fullMax'].split(" + ")
+                                            if (val not in param_map['place'].split(' + '))])
+    # Trial state remapping place cells, holding constant time and time:place interactions.
+    formulas['fullMax-gameState:place'] = " + ".join([val for val in formulas['fullMax'].split(" + ")
+                                                      if (val not in param_map['gameState:place'].split(' + '))])
+    # Joint time x place coding.
+    formulas['fullMax-time:place'] = " + ".join([val for val in formulas['fullMax'].split(" + ")
+                                                 if (val not in param_map['time:place'].split(' + '))])
+    
+    # ---------------------------------------------------------------------
+    # fullMax+penalty is the same as fullMax but adds parameters for time penalty
+    # and associated interactions of interest.
+    formulas['fullMax+penalty'] = strip_space(formulas['fullMax'] +
+                                              " +                                                     {_[penalty]}              + "
+                                              "{_[gameState:penalty]} + {_[time:penalty]}           + {_[place:penalty]}          "
+                                              .format(_=param_map))
+    # Interaction between time and penalty.
+    formulas['fullMax+penalty-time:penalty']  = " + ".join([val for val in formulas['fullMax+penalty'].split(" + ")
+                                                            if (val not in param_map['time:penalty'].split(' + '))])
+    # Interaction between place and penalty.
+    formulas['fullMax+penalty-place:penalty'] = " + ".join([val for val in formulas['fullMax+penalty'].split(" + ")
+                                                            if (val not in param_map['place:penalty'].split(' + '))])
+    
+    # ----------------------------------------------------------------------
+    # fullMax+goldDug is the same as fullMax but adds parameters for the number of
+    # golds dug per trial and associated interactions of interest.
+    formulas['fullMax+goldDug'] = strip_space(formulas['fullMax'] +
+                                              " +                                                     {_[goldDug]}              + "
+                                              "{_[gameState:goldDug]} + {_[time:goldDug]}           + {_[place:goldDug]}          "
+                                              .format(_=param_map))
+    # Interaction between time and goldDug.
+    formulas['fullMax+goldDug-time:goldDug']  = " + ".join([val for val in formulas['fullMax+goldDug'].split(" + ")
+                                                            if (val not in param_map['time:goldDug'].split(' + '))])
+    # Interaction between place and goldDug.
+    formulas['fullMax+goldDug-place:goldDug'] = " + ".join([val for val in formulas['fullMax+goldDug'].split(" + ")
+                                                            if (val not in param_map['place:goldDug'].split(' + '))])
+
+    return Xy, Xycols, formulas, param_map
+
+
+def run_ols_nav(subj_sess_unit,
+                game_states=['Encoding', 'Retrieval'],
+                formula_func=get_ols_nav_formulas,
+                n_perm=1000,
+                alpha=0.05,
+                mod_names=None,
+                mult_by=2,
+                proj_dir='/home1/dscho/projects/time_cells',
+                save_output=True,
+                overwrite=True,
+                verbose=False):
+    """Run time x place regression analysis for one neuron.
+    
+    Returns
+    -------
+    mod_pairs : dataframe
+        Likelihood ratio and empirical p-value for each model comparison.
+    ols_weights : dataframe
+        Beta weights and Z-scored weights for full model parameters.
+    """
+    # Load event and neuron info.
+    subj_sess, *neuron = subj_sess_unit.split('-')
+    neuron = '-'.join(neuron)
+    events = events_proc.load_events(subj_sess, proj_dir=proj_dir, verbose=verbose)
+    event_spikes = load_event_spikes(subj_sess, proj_dir=proj_dir, verbose=verbose)
+    hem, *roi = spike_preproc.roi_lookup(subj_sess, neuron.split('-')[0], proj_dir=proj_dir)
+    roi = ''.join(roi)
+    
+    # List the models that we want to extract weights for.
+    if mod_names is None:
+        mod_names = ['full',    'full+penalty',    'full+goldDug',
+                     'fullMax', 'fullMax+penalty', 'fullMax+goldDug']
+        
+    # Fit models to real data.
+    ols_mods, Xy, Xycols, *_ = get_ols_nav_mods(neuron,
+                                                events,
+                                                event_spikes,
+                                                formula_func=formula_func,
+                                                game_states=game_states,
+                                                circshift_frs=False)
+    paired_comps = _get_paired_comps('nav')
+    mod_pairs = get_ols_mod_pairs(ols_mods,
+                                  paired_comps)
+    ols_weights = get_ols_weights(ols_mods,
+                                  Xycols,
+                                  mod_names=mod_names,
+                                  mult_by=mult_by)
+
+    # Fit null models.
+    mod_pairs_null = []
+    ols_weights_null = []
+    for iPerm in range(n_perm):
+        _ols_mods_null, *_ = get_ols_nav_mods(neuron,
+                                              events,
+                                              event_spikes,
+                                              formula_func=formula_func,
+                                              game_states=game_states,
+                                              circshift_frs=True)
+        mod_pairs_null.append(get_ols_mod_pairs(_ols_mods_null,
+                                                paired_comps))
+        ols_weights_null.append(get_ols_weights(_ols_mods_null,
+                                                Xycols,
+                                                mod_names=mod_names,
+                                                mult_by=mult_by))
+    mod_pairs_null = pd.concat(mod_pairs_null, axis=0).reset_index(drop=True)    
+    ols_weights_null = pd.concat(ols_weights_null, axis=0).reset_index(drop=True)
+
+    # Test significance and Z-score weights against the null distribution.
+    mod_pairs[['z_lr', 'emp_pval']] = mod_pairs.apply(lambda x: _get_emp_pval(x, mod_pairs_null), axis=1).tolist()
+    mod_pairs['sig'] = mod_pairs['emp_pval'].apply(lambda x: x < alpha)
+    ols_weights['z_weight'] = ols_weights.apply(lambda x: _zscore_weights(x, ols_weights_null), axis=1)
+    
+    # Add unique identifiers.
+    for _df in (mod_pairs, ols_weights):
+        _df.insert(0, 'subj_sess_unit', subj_sess_unit)
+        _df.insert(1, 'hem', hem)
+        _df.insert(2, 'roi', roi)
+        _df.insert(3, 'gameState', '-'.join(game_states))
+        
+    # Save outputs.
+    if save_output:
+        mod_pairs_file = op.join(proj_dir, 'analysis', 'unit_to_behav',
+                                 '{}-{}-{}-ols_model_pairs.pkl'.format(subj_sess, neuron, '_'.join(game_states)))
+        ols_weights_file = op.join(proj_dir, 'analysis', 'unit_to_behav',
+                                   '{}-{}-{}-ols_weights.pkl'.format(subj_sess, neuron, '_'.join(game_states)))
+        if overwrite or not op.exists(mod_pairs_file):
+            dio.save_pickle(mod_pairs, mod_pairs_file, verbose)
+        if overwrite or not op.exists(ols_weights_file):
+            dio.save_pickle(ols_weights, ols_weights_file, verbose)
+
+    return mod_pairs, ols_weights
+
+
+def get_ols_nav_mods(neuron,
+                     events,
+                     event_spikes,
+                     formula_func,
+                     game_states=['Encoding', 'Retrieval'],
+                     event_spikes_idx=None,
+                     circshift_frs=False):
+    """Find the most important time bin.
+    Fit firing rates using OLS regression, iteratively removing
+    each time step from the data and recording 
+    
+    Parameters
+    ----------
+    neuron : str
+        e.g. '5-2' would be channel 5, unit 2
+    event_spikes : pd.DataFrame
+        EventSpikes instance that contains the event_spikes dataframe,
+        an expanded version of the behav_events dataframe with columns 
+        added for each neuron.
+    game_states : list[str]
+        Delay1, Encoding, Delay2, or Retrieval.
+    event_spikes_idx : list
+        Only event_spikes rows that correspond to the provided index
+        labels are used in the regression model. Overrides querying
+        by gameState.
+    
+    Returns
+    -------
+    ols_mods : dict[statsmodels.regression.linear_model.OLS]
+    Xy : dataframe
+        Contains the dependent variable and independent variables, with
+        all categorical variables deviation-coded.
+    Xycols : dict[list]
+        Xy column names, grouped by variable type.
+    formulas : dict[str]
+        Full and reduced model formulas.
+    """
+    warnings.filterwarnings('ignore')
+
+    # Select rows for the chosen game states.
+    if type(game_states) == str:
+        game_states = [game_states]
+    if event_spikes_idx is None:
+        _event_spikes = event_spikes.event_spikes.query("(gameState=={})".format(game_states)).reset_index(drop=True).copy()
+    else:
+        _event_spikes = event_spikes.event_spikes.loc[event_spikes_idx].reset_index(drop=True).copy()
+    
+    # Set retrieval gold views to 0.
+    _event_spikes.loc[(_event_spikes['gameState']=='Retrieval') & 
+                      (_event_spikes['gold_in_view']==1), 'gold_in_view'] = 0
+
+    # Add a column to track how many golds were successfully dug on each trial.
+    golds_dug_per_trial = events.dig_events.query("(dig_success==True)").groupby('trial').size()
+    _event_spikes.insert(4, 'gold_dug', _event_spikes['trial'].apply(lambda x: golds_dug_per_trial.get(x, 0)))
+
+    # Select columns to keep.
+    keep_cols = ['trial',         'gameState',    'time_step',    'maze_region',
+                 'head_direc',    'is_moving',    'base_in_view', 'gold_in_view',
+                 'dig_performed', 'time_penalty', 'gold_dug',     neuron]
+    _event_spikes = _event_spikes[keep_cols]
+    
+    # Set nans to 0.
+    fill_cols = ['is_moving', 'base_in_view', 'gold_in_view', 'dig_performed', 'time_penalty']
+    _event_spikes[fill_cols] = _event_spikes[fill_cols].fillna(0)    
+    
+    # Reset column datatypes.
+    _event_spikes['gameState'] = _event_spikes['gameState'].astype(str)
+    reset_cols = ['is_moving', 'base_in_view', 'gold_in_view', 'dig_performed', 'time_penalty']
+    for col in reset_cols:
+        _event_spikes[col] = _event_spikes[col].astype(int)
+    
+    # Circ-shift firing rates within each trial interval,
+    # then shuffle trial intervals across game states.
+    if circshift_frs:
+        _event_spikes[neuron] = _circshift_shuffle(_event_spikes, neuron, ['trial', 'gameState'])
+
+    # Fit the model.
+    Xy, Xycols, formulas, param_map = formula_func(neuron, _event_spikes)    
+    ols_mods = od([])
+    for mod, formula in formulas.items():
+        ols_mods[mod] = ols(formula, data=Xy)
+    
+    warnings.resetwarnings()
+
+    return ols_mods, Xy, Xycols, formulas, param_map
+
+
+def get_ols_mod_pairs(ols_mods,
+                      paired_comps):
+    """Return a dataframe of likehood ratios between nested model pairs."""
+    # Fit models.
+    mods_to_fit = np.unique([c for comps in paired_comps for c in comps if (c in ols_mods)])
+    mod_fits = od([])
+    for mod_name in mods_to_fit:
+        mod_fits[mod_name] = ols_mods[mod_name].fit()
+    
+    # Get likelihood ratios between model pairs.
+    mod_pairs = []
+    for full, red in paired_comps:
+        llf_full = mod_fits[full].llf
+        llf_red = mod_fits[red].llf
+        lr = get_lr(mod_fits[red], mod_fits[full])
+        lr, df, chi_pval = lr_test(mod_fits[red], mod_fits[full])
+        lr = np.max((lr, 0))
+        mod_pairs.append([full, red, llf_full, llf_red, df, lr])
+    mod_pairs = pd.DataFrame(mod_pairs, columns=['full', 'red', 'llf_full', 'llf_red', 'df', 'lr'])
+    return mod_pairs
+
+
+def get_ols_weights(ols_mods,
+                    Xycols,
+                    mod_names=['full'],
+                    include_icpt=True,
+                    mult_by=1):
+    """Return a dataframe of weights for the chosen models."""
+
+    # Hard-code the levels for time and place.
+    times = ['time_1', 'time_2', 'time_3', 'time_4', 'time_5',
+             'time_6', 'time_7', 'time_8', 'time_9', 'time_10']
+    places = ['place_Base',    'place_C_Hall',  'place_NE_Hall',   'place_NE_Room',
+              'place_NW_Hall', 'place_NW_Room', 'place_N_Passage', 'place_SE_Hall',
+              'place_SE_Room', 'place_SW_Hall', 'place_SW_Room',   'place_S_Passage']
+
+    mod_names = [m for m in mod_names if (m in ols_mods)]
+    mod_weights = []
+    for mod_name in mod_names:
+        param_map = _get_param_map(ols_mods[mod_name], Xycols)
+        mod_fit = ols_mods[mod_name].fit()
+        params = mod_fit.params
+        if include_icpt:
+            mod_weights.append([mod_name, 'icpt', 'icpt', params['Intercept']])
+        for factor, levels in param_map.items():
+            for level in levels:
+                if level in params:
+                    weight = params[level]
+                else:
+                    if factor == 'time:place':                    
+                        _time, _place = level.split(':')
+                        if _time != 'time_10':
+                            contrast_levels = ['{}:{}'.format(_time, x) for x in places[:-1]]
+                            weight = -np.sum(params[contrast_levels])
+                        elif _place != 'place_S_Passage':
+                            contrast_levels = ['{}:{}'.format(x, _place) for x in times[:-1]]
+                            weight = -np.sum(params[contrast_levels])
+                        else:
+                            contrast_levels = [x for x in levels if x in params]
+                            weight = np.sum(params[contrast_levels])
+                    else:
+                        contrast_levels = [x for x in levels if (x != level)]
+                        weight = -np.sum(params[contrast_levels])
+
+                mod_weights.append([mod_name, factor, level, weight])
+    mod_weights = pd.DataFrame(mod_weights,
+                               columns=['model', 'factor', 'level', 'weight'])
+    mod_weights['weight'] = mod_weights['weight'].astype(float)
+    mod_weights['weight'] *= mult_by # convert to firing rate in Hz
+    
+    return mod_weights
+
+
+def _get_paired_comps(compare):
+    """Return tuple pairs of full, reduced models to compare.
+
+    Parameters
+    ----------
+    compare : str
+        'delay' or 'nav'
+    """
+    if compare == 'delay':
+        paired_comps = [('full', 'full-gameState'),
+                        ('full', 'full-time,gameState:time'),
+                        ('full', 'full-time'),
+                        ('full', 'full-gameState:time')]
+    elif compare == 'nav':
+        paired_comps = [('full', 'full-gameState'),
+                        ('full', 'full-time,gameState:time'),
+                        ('full', 'full-time'),
+                        ('full', 'full-gameState:time'),
+                        ('full', 'full-place,gameState:place'),
+                        ('full', 'full-place'),
+                        ('full', 'full-gameState:place'),
+                        ('full', 'full-time:place'),
+                        ('full+penalty', 'full+penalty-time:penalty'),
+                        ('full+penalty', 'full+penalty-place:penalty'),
+                        ('full+goldDug', 'full+goldDug-time:goldDug'),
+                        ('full+goldDug', 'full+goldDug-place:goldDug'),
+                        ('fullMax', 'fullMax-gameState'),
+                        ('fullMax', 'fullMax-time,gameState:time'),
+                        ('fullMax', 'fullMax-time'),
+                        ('fullMax', 'fullMax-gameState:time'),
+                        ('fullMax', 'fullMax-place,gameState:place'),
+                        ('fullMax', 'fullMax-place'),
+                        ('fullMax', 'fullMax-gameState:place'),
+                        ('fullMax', 'fullMax-time:place'),
+                        ('fullMax+penalty', 'fullMax+penalty-time:penalty'),
+                        ('fullMax+penalty', 'fullMax+penalty-place:penalty'),
+                        ('fullMax+goldDug', 'fullMax+goldDug-time:goldDug'),
+                        ('fullMax+goldDug', 'fullMax+goldDug-place:goldDug')]
+    
+    return paired_comps
+
+
+def _get_param_map(ols_mod, Xycols):
+    """Add dropped columns for value-coded variables.
+
+    We're just hard-coding in these columns based on knowing the
+    event_spikes dataframe structure.
+    """
+    param_map = copy.deepcopy(Xycols)
+    param_map = od({k : v
+                    for k, v in param_map.items()
+                    if (v[0] in ols_mod.exog_names)})
+    
+    # Hard-code the levels for time and place.
+    times = ['time_1', 'time_2', 'time_3', 'time_4', 'time_5',
+             'time_6', 'time_7', 'time_8', 'time_9', 'time_10']
+    places = ['place_Base',    'place_C_Hall',  'place_NE_Hall',   'place_NE_Room',
+              'place_NW_Hall', 'place_NW_Room', 'place_N_Passage', 'place_SE_Hall',
+              'place_SE_Room', 'place_SW_Hall', 'place_SW_Room',   'place_S_Passage']
+
+    if 'time' in param_map:
+        param_map['time'].append('time_10')
+    if 'place' in param_map:
+        param_map['place'].append('place_S_Passage')
+    if 'headDirec' in param_map:
+        param_map['headDirec'].append('headDirec_W')
+    if 'gameState:time' in param_map:
+        param_map['gameState:time'].append('{}:time_10'.format(param_map['gameState'][0]))
+    if 'gameState:place' in param_map:
+        param_map['gameState:place'].append('{}:place_S_Passage'.format(param_map['gameState'][0]))
+    if 'time:place' in param_map:
+        param_map['time:place'] = []
+        for _place in places:
+            for _time in times:
+                time_place = '{}:{}'.format(_time, _place)
+                param_map['time:place'].append(time_place)
+    if 'time:penalty' in param_map:
+        param_map['time:penalty'].append('time_10:penalty_1')
+    if 'place:penalty' in param_map:
+        param_map['place:penalty'].append('place_S_Passage:penalty_1')
+    if 'time:goldDug' in param_map:
+        param_map['time:goldDug'].append('time_10:gold_dug')
+    if 'place:goldDug' in param_map:
+        param_map['place:goldDug'].append('place_S_Passage:gold_dug')
+    if 'gameState:headDirec' in param_map:
+        param_map['gameState:headDirec'].append('{}:headDirec_W'.format(param_map['gameState'][0]))
+
+    return param_map
+
+
+def _get_emp_pval(x, mod_pairs_null):
+    null_lrs = mod_pairs_null.query("(full=='{}') & (red=='{}')".format(x['full'], x['red']))['lr'].values
+    n_perm = null_lrs.size
+    z_lr = (x['lr'] - np.nanmean(null_lrs)) / np.nanstd(null_lrs)
+    pval_ind = np.sum(null_lrs >= x['lr'])
+    emp_pval = (pval_ind + 1) / (n_perm + 1)
+    return z_lr, emp_pval
+
+
+def _zscore_weights(x, ols_weights_null):
+    null_weights = (ols_weights_null.query("(model=='{}') & (factor=='{}') & (level=='{}')"
+                                           .format(x['model'], x['factor'], x['level']))['weight'].values)
+    null_mean = np.nanmean(null_weights)
+    null_std = np.nanstd(null_weights)
+    if null_std < 1e-12:
+        z_weight = 0
+    else:
+        z_weight = (x['weight'] - null_mean) / null_std
+    return z_weight
 
 
 def model_unit_fr(subj_sess,
@@ -706,6 +1755,34 @@ def spikes_per_timebin(events_behav,
     return events_behav.apply(lambda x: count_spikes(x, spike_times), axis=1)
 
 
+def _circshift_shuffle(df, 
+                       output_col,
+                       grpby=['trial', 'gameState']):
+    """Circ-shift col values within each group, and shuffle grouped rows.
+    
+    Both operations are randomized.
+    
+    Parameters
+    ----------
+    df : dataframe
+        Contains the grouping columns and output column. 
+    output_col : str
+        The column whose values get shifted around.
+    grpby : str or list[str]
+        The grouping column[s].
+        
+    Returns
+    -------
+    null_vals : np.array
+        Vector of shifted output_col values.
+    """
+    null_vals = np.concatenate(np.random.permutation(df.groupby(grpby, sort=False)[output_col]
+                                                       .apply(lambda x: list(_shift_spikes(x)))
+                                                       .tolist()))
+    
+    return null_vals
+
+
 def _shift_spikes(spike_vec):
     """Circularly shift spike vector."""
     roll_by = np.random.randint(0, len(spike_vec))
@@ -1046,43 +2123,157 @@ def get_sparsity(spike_mat):
     return numer / denom
 
 
-def bootstrap_time_fields(spike_mat,
-                          z_thresh=2,
-                          n_perm=1000):
-    """Identify time fields using a bootstrap estimation method.
+def bootstrap_time_fields(subj_sess_unit,
+                          game_states,
+                          mult=2,
+                          smooth=0,
+                          n_perm=1000,
+                          thresh=1.96,
+                          max_skips=1,
+                          proj_dir='/home1/dscho/projects/time_cells',
+                          save_output=True,
+                          overwrite=False,
+                          verbose=True):
+    """Return a dataframe of time fields."""
+    # Load the saved file if it exists.
+    filename = op.join(proj_dir, 'analysis', 'time_fields',
+                       '{}-{}-smooth{}-{}perm-zthresh{}-max_skips{}-time_fields.pkl'
+                       .format(subj_sess_unit, '_'.join(game_states), smooth, n_perm, thresh, max_skips))
+    if op.exists(filename) and not overwrite:
+        time_fields = dio.open_pickle(filename)
+        return time_fields
     
-    n_trial values are drawn from spike_mat with replacement, and
-    the mean across them is calculated. This is repeated 500 times
-    to obtain a sample distribution. Actual mean firing rates across
-    trials are then Z-scored against this distribution, and time fields
-    are defined as any time bin with a Z-score > z_thresh.
+    # Load the data.
+    subj_sess = subj_sess_unit.split('-')[0]
+    neuron = '-'.join(subj_sess_unit.split('-')[1:])
+    event_spikes = load_event_spikes(subj_sess,
+                                     proj_dir=proj_dir,
+                                     verbose=False)
+    spike_mat = {game_state: event_spikes.get_spike_mat(neuron, game_state).values * mult
+                 for game_state in game_states} # trial x time_bin
+
+    # Smooth spike counts over time, separately for each trial and game_state.
+    if smooth:
+        spike_mat = {game_state: np.array([gaussian_filter1d(spike_mat[game_state][iTrial, :].astype(float), smooth)
+                                           for iTrial in range(spike_mat[game_state].shape[0])])
+                     for game_state in game_states}
+
+    # Combine the game states.
+    game_states.append(''.join(game_states))
+    spike_mat[game_states[-1]] = np.concatenate(list(spike_mat.values()))
+
+    # Get the mean firing rate in each time bin, across trials.
+    mean_frs = {game_state: np.mean(spike_mat[game_state], axis=0)
+                for game_state in game_states}
     
-    Parameters
-    ----------
-    spike_mat : DataFrame
-        A trial x time_bin matrix of spike counts.
-    z_thresh : real number
-        Time fields are defined by Z-scored mean firing rates > z_thresh.
+    # Get the null distribution of mean firing rates
+    # by circ-shifting spikes within each trial.
+    mean_frs_null = {game_state: [] for game_state in game_states}
+    for iPerm in range(n_perm):
+        spike_mat_null = {game_state: np.array([_shift_spikes(spike_mat[game_state][iTrial, :])
+                                                for iTrial in range(spike_mat[game_state].shape[0])])
+                          for game_state in game_states}
+        for game_state in game_states:
+            mean_frs_null[game_state].append(np.mean(spike_mat_null[game_state], axis=0))
+
+    # Z-score firing rates.
+    z_frs = {game_state: (mean_frs[game_state] - np.mean(mean_frs_null[game_state], axis=0)) / np.std(mean_frs_null[game_state], axis=0)
+             for game_state in game_states}
+
+    # Find time fields.
+    time_fields = []
+    for game_state in game_states:
+        _z_frs = z_frs[game_state]
+        assert len(_z_frs) == len(np.unique(_z_frs))
+
+        # Identify positive time fields.
+        keep = np.where(np.isfinite(_z_frs))[0]
+        while len(keep) > 0:
+            peak_z = np.max(_z_frs[keep])
+            field_peak = np.where(_z_frs == peak_z)[0][0]
+            field_idx = [field_peak]
+            if peak_z > thresh:
+                # Scan backwards.
+                _idx = field_peak - 1
+                skips = 0
+                while (_idx in keep) & (skips <= max_skips):
+                    if _z_frs[_idx] > thresh:
+                        field_idx.append(_idx)
+                    else:
+                        skips += 1
+                    _idx -= 1
+
+                # Scan forwards.
+                _idx = field_peak + 1
+                skips = 0
+                while (_idx in keep) & (skips <= max_skips):
+                    if _z_frs[_idx] > thresh:
+                        field_idx.append(_idx)
+                    else:
+                        skips += 1
+                    _idx += 1
+                
+                # Append the field.
+                field_idx = list(np.sort(field_idx))
+                mean_z = np.mean(_z_frs[field_idx])
+                time_fields.append([subj_sess_unit, game_state, 'pos',
+                                    field_peak, peak_z, mean_z, len(field_idx), field_idx])
+
+                # Remove the field from consideration.
+                keep = [x for x in keep if x not in field_idx]
+            else:
+                break
+
+        # Identify negative time fields.
+        keep = np.where(np.isfinite(_z_frs))[0]
+        while len(keep) > 0:
+            peak_z = np.min(_z_frs[keep])
+            field_peak = np.where(_z_frs == peak_z)[0][0]
+            field_idx = [field_peak]
+            if peak_z < -thresh:
+                # Scan backwards.
+                _idx = field_peak - 1
+                skips = 0
+                while (_idx in keep) & (skips <= max_skips):
+                    if _z_frs[_idx] < -thresh:
+                        field_idx.append(_idx)
+                    else:
+                        skips += 1
+                    _idx -= 1
+
+                # Scan forwards.
+                _idx = field_peak + 1
+                skips = 0
+                while (_idx in keep) & (skips <= max_skips):
+                    if _z_frs[_idx] < -thresh:
+                        field_idx.append(_idx)
+                    else:
+                        skips += 1
+                    _idx += 1
+
+                # Append the field.
+                field_idx = list(np.sort(field_idx))
+                mean_z = np.mean(_z_frs[field_idx])
+                time_fields.append([subj_sess_unit, game_state, 'neg',
+                                    field_peak, peak_z, mean_z, len(field_idx), field_idx])
+
+                # Remove the field from consideration.
+                keep = [x for x in keep if x not in field_idx]
+            else:
+                break
+
+    cols = ['subj_sess_unit', 'gameState', 'field_type',
+            'field_peak', 'peak_z', 'mean_z', 'field_size', 'field_idx']
+    time_fields = pd.DataFrame(time_fields, columns=cols)
+    
+    output = od([('time_fields', time_fields),
+                 ('z_frs', z_frs)])
+
+    # Save the output data.
+    if save_output:
+        dio.save_pickle(output, filename, verbose)
         
-    Returns
-    -------
-    cutoff_fr : float
-        The firing rate above which values are defined as time fields.
-    z_mean_frs : Series
-        Z-scored firing rates over time.
-    time_field : array[int]
-        All time bins with Z-scores > z_thresh.
-    """
-    n_trial = spike_mat.shape[0]
-    mean_frs = np.mean(spike_mat, axis=0)
-    spike_vals = spike_mat.values.ravel()
-    sample_mean_frs = np.array([np.mean(random.choices(spike_vals, k=n_trial)) for _ in range(n_perm)])
-    sample_mean = np.mean(sample_mean_frs)
-    sample_std = np.std(sample_mean_frs)
-    cutoff_fr = (z_thresh * sample_std) + sample_mean
-    z_mean_frs = (mean_frs - sample_mean) / sample_std
-    time_field = np.where(z_mean_frs > z_thresh)[0]
-    return cutoff_fr, z_mean_frs, time_field
+    return output
 
 
 def bootstrap_time_fields2(spike_mat,
