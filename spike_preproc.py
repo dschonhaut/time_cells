@@ -507,6 +507,46 @@ def roi_mapping(n=3):
                 'TO': 'Temporal',
                 'TP': 'Temporal',
                 'TPO': 'Temporal'}
+    elif n == 6:
+        rois = {'A': 'A',
+                'AC': 'Frontal',
+                'AH': 'Hippocampus',
+                'AI': 'Cortex',
+                'EC': 'EC',
+                'FOp': 'Frontal',
+                'FOP': 'Frontal',
+                'FSG': 'Temporal',
+                'HGa': 'Temporal',
+                'MFG': 'Frontal',
+                'MH': 'Hippocampus',
+                'O': 'Cortex',
+                'OF': 'Frontal',
+                'PHG': 'Temporal',
+                'PI-SMG': 'Frontal',
+                'pSMA': 'Frontal',
+                'TO': 'Temporal',
+                'TP': 'Temporal',
+                'TPO': 'Temporal'}
+    elif n == 7:
+        rois = {'A': 'A',
+                'AC': 'Prefrontal',
+                'AH': 'Hippocampus',
+                'AI': 'Cortex',
+                'EC': 'EC',
+                'FOp': 'Prefrontal',
+                'FOP': 'Prefrontal',
+                'FSG': 'Inf. temporal',
+                'HGa': 'Lat. temporal',
+                'MFG': 'Prefrontal',
+                'MH': 'Hippocampus',
+                'O': 'Cortex',
+                'OF': 'Prefrontal',
+                'PHG': 'Inf. temporal',
+                'PI-SMG': 'Prefrontal',
+                'pSMA': 'Prefrontal',
+                'TO': 'Lat. temporal',
+                'TP': 'Lat. temporal',
+                'TPO': 'Lat. temporal'}
     else:
         raise ValueError('n={} map regions has not been implemented'.format(n))
 
