@@ -453,6 +453,7 @@ def plot_firing_maze2(subj_sess,
     return fig, ax
 
 
+<<<<<<< HEAD
 def plot_firing_maze_split_time(subj_sess,
                                 neuron,
                                 scale_by=10,
@@ -671,6 +672,8 @@ def plot_firing_maze_split_time(subj_sess,
     return fig, ax
 
 
+=======
+>>>>>>> 288ef90488a75ccdf754e8946f1eb37476c7d185
 def plot_firing_maze(subj_sess,
                      neuron,
                      game_states,

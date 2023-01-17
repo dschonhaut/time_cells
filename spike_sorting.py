@@ -17,10 +17,17 @@ Last Edited
 ----------- 
 10/5/20
 """
+<<<<<<< HEAD
 import os.path as op
 from collections import OrderedDict as od
 # import mkl
 # mkl.set_num_threads(1)
+=======
+import os
+from collections import OrderedDict as od
+import mkl
+mkl.set_num_threads(1)
+>>>>>>> 288ef90488a75ccdf754e8946f1eb37476c7d185
 import numpy as np
 from scipy.io import loadmat
 import h5py
@@ -49,7 +56,10 @@ colors = [sns.color_palette('Blues', n_)[c_],
 
 
 def compile_wave_clus(subj_sess,
+<<<<<<< HEAD
                       proj_dir='/data7/goldmine',
+=======
+>>>>>>> 288ef90488a75ccdf754e8946f1eb37476c7d185
                       verbose=True):
     """Return wave_clus output dict for the session.
 
@@ -62,6 +72,7 @@ def compile_wave_clus(subj_sess,
     """
     # Parameters.
     subj, sess = subj_sess.split('_')
+<<<<<<< HEAD
     subj_dir = op.join(proj_dir, 'data', subj, sess)
     lfp_dir = op.join(subj_dir, 'micro_lfps')
     spikes_dir = op.join(subj_dir, 'spikes', 'wave_clus3_sortbyhand')
@@ -71,6 +82,17 @@ def compile_wave_clus(subj_sess,
     assert op.exists(spikes_dir)
     assert op.exists(lfp_timestamps_f)
     assert op.exists(elec_montage_f)
+=======
+    subj_dir = os.path.join('/Users/danielschonhaut/penn/lab/projects/time_cells/data', subj, sess)
+    lfp_dir = os.path.join(subj_dir, 'micro_lfps')
+    spikes_dir = os.path.join(subj_dir, 'spikes', 'wave_clus3_sortbyhand')
+    lfp_dir = os.path.join(subj_dir, 'micro_lfps')
+    lfp_timestamps_f = os.path.join(lfp_dir, 'lfpTimeStamps_micro.mat')
+    elec_montage_f = os.path.join(lfp_dir, 'anatleads.txt')
+    assert os.path.exists(spikes_dir)
+    assert os.path.exists(lfp_timestamps_f)
+    assert os.path.exists(elec_montage_f)
+>>>>>>> 288ef90488a75ccdf754e8946f1eb37476c7d185
     
     # Load LFP timestamps.
     lfp_timestamps, sr = load_lfp_timestamps(lfp_timestamps_f=lfp_timestamps_f, 
@@ -87,8 +109,13 @@ def compile_wave_clus(subj_sess,
     for roi in rois:  
         chans = mont[roi]
         for chan in chans:
+<<<<<<< HEAD
             wave_clusf = op.join(spikes_dir, 'times_CSC{}.mat'.format(chan))
             if not op.exists(wave_clusf):
+=======
+            wave_clusf = os.path.join(spikes_dir, 'times_CSC{}.mat'.format(chan))
+            if not os.path.exists(wave_clusf):
+>>>>>>> 288ef90488a75ccdf754e8946f1eb37476c7d185
                 continue
             cluster_class = loadmat(wave_clusf)['cluster_class']
             neurons, spike_inds = np.unique(cluster_class[:, 0], return_inverse=True)
@@ -130,9 +157,15 @@ def load_lfp_timestamps(subj_sess=None,
     """
     if lfp_timestamps_f is None:
         subj, sess = subj_sess.split('_')
+<<<<<<< HEAD
         lfp_timestamps_f = op.join(proj_dir, 'data', subj, sess,
                                    'micro_lfps', 'lfpTimeStamps_micro.mat')
     if op.exists(lfp_timestamps_f):
+=======
+        lfp_timestamps_f = os.path.join(proj_dir, 'data', subj, sess,
+                                        'micro_lfps', 'lfpTimeStamps_micro.mat')
+    if os.path.exists(lfp_timestamps_f):
+>>>>>>> 288ef90488a75ccdf754e8946f1eb37476c7d185
         try:
             lfp_timestamps = np.squeeze(loadmat(lfp_timestamps_f)['timeStamps'])
         except NotImplementedError:

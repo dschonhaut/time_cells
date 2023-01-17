@@ -21,8 +21,13 @@ import sys
 import os
 from collections import OrderedDict as od
 import h5py
+<<<<<<< HEAD
 # import mkl
 # mkl.set_num_threads(1)
+=======
+import mkl
+mkl.set_num_threads(1)
+>>>>>>> 288ef90488a75ccdf754e8946f1eb37476c7d185
 import numpy as np
 import pandas as pd
 import scipy.io as sio

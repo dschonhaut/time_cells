@@ -24,8 +24,13 @@ from collections import OrderedDict as od
 import itertools
 import warnings
 import random
+<<<<<<< HEAD
 # import mkl
 # mkl.set_num_threads(1)
+=======
+import mkl
+mkl.set_num_threads(1)
+>>>>>>> 288ef90488a75ccdf754e8946f1eb37476c7d185
 import numpy as np
 import scipy.stats as stats
 from scipy.ndimage.filters import gaussian_filter1d
@@ -2149,13 +2154,26 @@ def bootstrap_time_fields(subj_sess_unit,
     event_spikes = load_event_spikes(subj_sess,
                                      proj_dir=proj_dir,
                                      verbose=False)
+<<<<<<< HEAD
     spike_mat = {game_state: event_spikes.get_spike_mat(neuron, game_state).values * float(mult)
                  for game_state in game_states} # trial x time_bin
 
+=======
+    spike_mat = {game_state: event_spikes.get_spike_mat(neuron, game_state).values * mult
+                 for game_state in game_states} # trial x time_bin
+
+    # Smooth spike counts over time, separately for each trial and game_state.
+    if smooth:
+        spike_mat = {game_state: np.array([gaussian_filter1d(spike_mat[game_state][iTrial, :].astype(float), smooth)
+                                           for iTrial in range(spike_mat[game_state].shape[0])])
+                     for game_state in game_states}
+
+>>>>>>> 288ef90488a75ccdf754e8946f1eb37476c7d185
     # Combine the game states.
     game_states.append(''.join(game_states))
     spike_mat[game_states[-1]] = np.concatenate(list(spike_mat.values()))
 
+<<<<<<< HEAD
     # Smooth spike counts over time, separately for each trial and game_state.
     if smooth > 0:
         spike_mat_obs = {game_state: np.array([gaussian_filter1d(spike_mat[game_state][iTrial, :], smooth)
@@ -2166,12 +2184,17 @@ def bootstrap_time_fields(subj_sess_unit,
 
     # Get the mean firing rate in each time bin, across trials.
     mean_frs = {game_state: np.mean(spike_mat_obs[game_state], axis=0)
+=======
+    # Get the mean firing rate in each time bin, across trials.
+    mean_frs = {game_state: np.mean(spike_mat[game_state], axis=0)
+>>>>>>> 288ef90488a75ccdf754e8946f1eb37476c7d185
                 for game_state in game_states}
     
     # Get the null distribution of mean firing rates
     # by circ-shifting spikes within each trial.
     mean_frs_null = {game_state: [] for game_state in game_states}
     for iPerm in range(n_perm):
+<<<<<<< HEAD
         if smooth > 0:
             spike_mat_null = {game_state: np.array([gaussian_filter1d(_shift_spikes(spike_mat[game_state][iTrial, :]), smooth)
                                                     for iTrial in range(spike_mat[game_state].shape[0])])
@@ -2197,6 +2220,18 @@ def bootstrap_time_fields(subj_sess_unit,
     z_frs_null_min = {game_state: np.min(z_frs_null[game_state], axis=1)
                       for game_state in game_states}
 
+=======
+        spike_mat_null = {game_state: np.array([_shift_spikes(spike_mat[game_state][iTrial, :])
+                                                for iTrial in range(spike_mat[game_state].shape[0])])
+                          for game_state in game_states}
+        for game_state in game_states:
+            mean_frs_null[game_state].append(np.mean(spike_mat_null[game_state], axis=0))
+
+    # Z-score firing rates.
+    z_frs = {game_state: (mean_frs[game_state] - np.mean(mean_frs_null[game_state], axis=0)) / np.std(mean_frs_null[game_state], axis=0)
+             for game_state in game_states}
+
+>>>>>>> 288ef90488a75ccdf754e8946f1eb37476c7d185
     # Find time fields.
     time_fields = []
     for game_state in game_states:
@@ -2284,9 +2319,13 @@ def bootstrap_time_fields(subj_sess_unit,
     time_fields = pd.DataFrame(time_fields, columns=cols)
     
     output = od([('time_fields', time_fields),
+<<<<<<< HEAD
                  ('z_frs', z_frs),
                  ('z_frs_null_max', z_frs_null_max),
                  ('z_frs_null_min', z_frs_null_min)])
+=======
+                 ('z_frs', z_frs)])
+>>>>>>> 288ef90488a75ccdf754e8946f1eb37476c7d185
 
     # Save the output data.
     if save_output:

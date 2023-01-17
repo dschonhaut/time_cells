@@ -22,8 +22,13 @@ import sys
 import os.path as op
 from glob import glob
 from collections import OrderedDict as od
+<<<<<<< HEAD
 # import mkl
 # mkl.set_num_threads(1)
+=======
+import mkl
+mkl.set_num_threads(1)
+>>>>>>> 288ef90488a75ccdf754e8946f1eb37476c7d185
 import numpy as np
 from scipy.ndimage.filters import gaussian_filter1d
 import pandas as pd
@@ -397,6 +402,7 @@ def roi_lookup(subj_sess,
                chan,
                proj_dir='/home1/dscho/projects/time_cells'):
     """Given a channel, return the region."""
+<<<<<<< HEAD
     mont = get_montage(subj_sess, proj_dir=proj_dir)
     for hemroi, chans in mont.items():
         if np.int(chan) in chans:
@@ -407,15 +413,26 @@ def roi_lookup(subj_sess,
 def get_montage(subj_sess,
                 proj_dir='/home1/dscho/projects/time_cells'):
     """Return the montage for a given session."""
+=======
+>>>>>>> 288ef90488a75ccdf754e8946f1eb37476c7d185
     subj, sess = subj_sess.split('_')
     elec_montage_f = op.join(proj_dir, 'data', subj, sess, 'micro_lfps', 'anatleads.txt')
     with open(elec_montage_f, 'r') as f:
         mont = f.readlines()
     mont = [line.strip('\n').split(', ') for line in mont]
+<<<<<<< HEAD
     mont = pd.Series(od([(x[0].replace('-', '_'),
                           np.arange(int(x[1].split('-')[0]), int(x[1].split('-')[1])+1))
                          for x in mont]))
     return mont
+=======
+    mont = od([(x[0], np.arange(int(x[1].split('-')[0]), int(x[1].split('-')[1])+1))
+               for x in mont])
+    for hemroi, chans in mont.items():
+        if np.int(chan) in chans:
+            return hemroi
+    return ''
+>>>>>>> 288ef90488a75ccdf754e8946f1eb37476c7d185
 
 
 def roi_mapping(n=3):
@@ -477,6 +494,7 @@ def roi_mapping(n=3):
                 'TPO': 'Cortex'}
     elif n == 4:
         rois = {'A': 'MTL',
+<<<<<<< HEAD
                 'AC': 'PFC',
                 'AH': 'HPC',
                 'AI': 'TPC',
@@ -656,6 +674,86 @@ def roi_mapping(n=3):
                 'TO'    : 'Other',
                 'TP'    : 'LTC',
                 'TPO'   : 'LTC'}
+=======
+                'AC': 'Frontal',
+                'AH': 'Hippocampus',
+                'AI': 'Cortex',
+                'EC': 'MTL',
+                'FOp': 'Frontal',
+                'FOP': 'Frontal',
+                'FSG': 'Cortex',
+                'HGa': 'Cortex',
+                'MFG': 'Frontal',
+                'MH': 'Hippocampus',
+                'O': 'Cortex',
+                'OF': 'Frontal',
+                'PHG': 'MTL',
+                'PI-SMG': 'Frontal',
+                'pSMA': 'Frontal',
+                'TO': 'Cortex',
+                'TP': 'Cortex',
+                'TPO': 'Cortex'}
+    elif n == 5:
+        rois = {'A': 'MTL',
+                'AC': 'Frontal',
+                'AH': 'Hippocampus',
+                'AI': 'Cortex',
+                'EC': 'MTL',
+                'FOp': 'Frontal',
+                'FOP': 'Frontal',
+                'FSG': 'Temporal',
+                'HGa': 'Temporal',
+                'MFG': 'Frontal',
+                'MH': 'Hippocampus',
+                'O': 'Cortex',
+                'OF': 'Frontal',
+                'PHG': 'MTL',
+                'PI-SMG': 'Frontal',
+                'pSMA': 'Frontal',
+                'TO': 'Temporal',
+                'TP': 'Temporal',
+                'TPO': 'Temporal'}
+    elif n == 6:
+        rois = {'A': 'A',
+                'AC': 'Frontal',
+                'AH': 'Hippocampus',
+                'AI': 'Cortex',
+                'EC': 'EC',
+                'FOp': 'Frontal',
+                'FOP': 'Frontal',
+                'FSG': 'Temporal',
+                'HGa': 'Temporal',
+                'MFG': 'Frontal',
+                'MH': 'Hippocampus',
+                'O': 'Cortex',
+                'OF': 'Frontal',
+                'PHG': 'Temporal',
+                'PI-SMG': 'Frontal',
+                'pSMA': 'Frontal',
+                'TO': 'Temporal',
+                'TP': 'Temporal',
+                'TPO': 'Temporal'}
+    elif n == 7:
+        rois = {'A': 'A',
+                'AC': 'Prefrontal',
+                'AH': 'Hippocampus',
+                'AI': 'Cortex',
+                'EC': 'EC',
+                'FOp': 'Prefrontal',
+                'FOP': 'Prefrontal',
+                'FSG': 'Inf. temporal',
+                'HGa': 'Lat. temporal',
+                'MFG': 'Prefrontal',
+                'MH': 'Hippocampus',
+                'O': 'Cortex',
+                'OF': 'Prefrontal',
+                'PHG': 'Inf. temporal',
+                'PI-SMG': 'Prefrontal',
+                'pSMA': 'Prefrontal',
+                'TO': 'Lat. temporal',
+                'TP': 'Lat. temporal',
+                'TPO': 'Lat. temporal'}
+>>>>>>> 288ef90488a75ccdf754e8946f1eb37476c7d185
     else:
         raise ValueError('n={} map regions has not been implemented'.format(n))
 

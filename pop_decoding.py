@@ -163,12 +163,18 @@ def load_pop_spikes(exclude_ctx=True,
 
     # Exclude cortical units outside MTL, prefrontal, or temporal lobe.
     if exclude_ctx:
+<<<<<<< HEAD
         # n_rois = 5
         # roi_map = spike_preproc.roi_mapping(n_rois)
         # keep_idx = np.where(np.array([roi_map[spike_preproc.roi_lookup(x.split('-')[0], x.split('-')[1])[1:]]
         #                               for x in pop_spikes.neurons]) != 'Cortex')[0]
         keep_idx = ~np.isin([spike_preproc.roi_lookup(x.split('-')[0], x.split('-')[1])[1:]
                              for x in pop_spikes.neurons], ['AI', 'O'])
+=======
+        n_rois = 5
+        roi_map = spike_preproc.roi_mapping(n_rois)
+        keep_idx = np.where(np.array([roi_map[spike_preproc.roi_lookup(x.split('-')[0], x.split('-')[1])[1:]] for x in pop_spikes.neurons]) != 'Cortex')[0]
+>>>>>>> 288ef90488a75ccdf754e8946f1eb37476c7d185
         pop_spikes.neurons = pop_spikes.neurons[keep_idx]
         keep_cols = ['trial', 'gameState', 'time_bin'] + pop_spikes.neurons.tolist()
         pop_spikes.pop_spikes = pop_spikes.pop_spikes[keep_cols]
@@ -185,6 +191,7 @@ def _combine_time_bins(spike_mat, bins=10):
         return None
 
 
+<<<<<<< HEAD
 def classify_place(subj_sess,
                    game_states=['Encoding', 'Retrieval'],
                    save_clfs=False,
@@ -701,6 +708,8 @@ def classify_within_subj(subj_sess,
     return clf_results
 
 
+=======
+>>>>>>> 288ef90488a75ccdf754e8946f1eb37476c7d185
 def classify_time(unit_groups=None,
                   n_subset_units=None,
                   exclude_ctx=True,
